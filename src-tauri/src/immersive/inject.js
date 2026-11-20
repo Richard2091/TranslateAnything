@@ -128,22 +128,89 @@
     return !el || !!el.closest(SKIP);
   }
 
+  // ───────────── 段落等待提示（不改变现有文本节点翻译粒度） ─────────────
+
+  const PROSE = 'p, li, blockquote';
+  const NOT_PROSE = 'nav, aside, menu, table, button, [role="navigation"], [role="menu"], [role="menuitem"], [role="tab"], [role="button"]';
+  const loaders = new Map(); // 正文块 → 同一段唯一的指示器
+  const nodeLoaders = new WeakMap();
+  const loaderElements = new WeakSet();
+  const reduceMotion = matchMedia('(prefers-reduced-motion: reduce)');
+
+  function clearLoader(entry) {
+    clearTimeout(entry.timer);
+    entry.animation?.cancel();
+    entry.icon?.remove();
+    for (const node of entry.nodes) nodeLoaders.delete(node);
+    loaders.delete(entry.block);
+  }
+
+  function settled(node) {
+    const entry = nodeLoaders.get(node);
+    if (!entry) return;
+    nodeLoaders.delete(node);
+    entry.nodes.delete(node);
+    if (!entry.nodes.size) clearLoader(entry);
+  }
+
+  function trackLoading(node) {
+    if (nodeLoaders.has(node)) return;
+    const el = node.parentElement;
+    const block = el?.closest(PROSE);
+    if (!block || el.closest(NOT_PROSE)) return;
+    let entry = loaders.get(block);
+    if (!entry) {
+      entry = { block, nodes: new Set(), timer: 0, icon: null };
+      loaders.set(block, entry);
+      entry.timer = setTimeout(() => showLoader(entry), 200);
+    }
+    entry.nodes.add(node);
+    nodeLoaders.set(node, entry);
+  }
+
+  function showLoader(entry) {
+    const { block } = entry;
+    if (!block.isConnected) return clearLoader(entry);
+    const icon = document.createElement('span');
+    loaderElements.add(icon);
+    icon.setAttribute('aria-hidden', 'true');
+    icon.setAttribute('translate', 'no');
+    // 不设置 inset：使用段尾的静态位置，但绝对定位不参与正文换行。
+    icon.style.cssText = 'position:absolute;display:inline-block;box-sizing:border-box;'
+      + 'width:.75em;height:.75em;margin-inline-start:.35em;margin-block-start:.22em;'
+      + 'border:2px solid transparent;border-top-color:currentColor;border-inline-start-color:currentColor;'
+      + 'border-radius:50%;opacity:.45;pointer-events:none;user-select:none';
+    entry.icon = icon;
+    block.append(icon);
+    if (!reduceMotion.matches) {
+      entry.animation = icon.animate([{ transform: 'rotate(0deg)' }, { transform: 'rotate(360deg)' }],
+        { duration: 800, iterations: Infinity });
+    }
+    // 引擎长时间不响应或回填丢失时，别让提示永久留在页面上。
+    entry.timer = setTimeout(() => clearLoader(entry), 45000);
+  }
+
   // ───────────── 文字节点 ─────────────
 
   function handleText(node, checked) {
     const v = node.data;
     const old = node[REC];
     if (old && v === old.shown) return; // 我们自己写进去的
+    const loader = nodeLoaders.get(node);
+    if (loader && (v !== old?.src || !loader.block.contains(node))) settled(node);
     const core = v.trim();
     if (!worthCore(core) || (!checked && skippedText(node.parentElement))) {
+      settled(node);
       if (old) node[REC] = undefined;
       return;
     }
     const r = record(v, core);
     node[REC] = r;
     const tr = cache.get(core);
-    if (tr !== undefined) applyText(node, r, tr);
-    else want(core, node, null);
+    if (tr !== undefined) {
+      settled(node);
+      applyText(node, r, tr);
+    } else want(core, node, null);
   }
 
   function applyText(node, r, tr) {
@@ -203,6 +270,7 @@
     let set = waiting.get(core);
     if (!set) waiting.set(core, (set = new Set()));
     set.add(attr ? { el: target, attr } : { node: target });
+    if (!attr) trackLoading(target);
     if (!inflight.has(core)) {
       queue.add(core);
       if (!timer) timer = setTimeout(flush, 30);
@@ -243,7 +311,10 @@
       for (const t of set) {
         if (t.node) {
           const r = t.node[REC];
-          if (r && r.core === src) applyText(t.node, r, tr);
+          if (r && r.core === src && t.node.data === r.src) {
+            settled(t.node);
+            applyText(t.node, r, tr);
+          }
         } else {
           const r = t.el[AREC]?.[t.attr];
           if (r && r.core === src) applyAttr(t.el, t.attr, r, tr);
@@ -255,7 +326,12 @@
   /** 翻译失败：过一会儿重试仍在等待的原文 */
   function failed(msg) {
     const texts = msg.texts || [];
-    for (const t of texts) inflight.delete(t);
+    for (const t of texts) {
+      inflight.delete(t);
+      for (const { node } of waiting.get(t) || []) {
+        if (node?.[REC]?.core === t) settled(node);
+      }
+    }
     setTimeout(() => {
       for (const t of texts) if (waiting.has(t) && !inflight.has(t)) queue.add(t);
       if (queue.size && !timer) timer = setTimeout(flush, 30);
@@ -364,7 +440,18 @@
         const r = m.target[AREC]?.[m.attributeName];
         if (!r || m.target.getAttribute(m.attributeName) !== r.shown) work.push({ attr: [m.target, m.attributeName] });
       } else {
-        for (const n of m.addedNodes) work.push({ root: n });
+        for (const n of m.addedNodes) {
+          if (!loaderElements.has(n)) work.push({ root: n });
+        }
+        // 遍历移除的子树，避免动态页面上的旧等待状态留到超时。
+        for (const n of m.removedNodes) {
+          if (n.isConnected || loaderElements.has(n)) continue;
+          if (n.nodeType === 3) settled(n);
+          else if (n.nodeType === 1 && loaders.size) {
+            const walker = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+            for (let text; loaders.size && (text = walker.nextNode());) settled(text);
+          }
+        }
       }
     }
     // 先同步做一片：命中缓存的文字在这一帧画出来之前就换好，不闪原文
@@ -386,6 +473,7 @@
   function stop(restore = true) {
     mo.disconnect();
     mo.takeRecords();
+    for (const entry of loaders.values()) clearLoader(entry);
     work = [];
     head = 0;
     eachRecord((node, name, r) => {
@@ -427,6 +515,7 @@
       if (cur !== r.src && cur !== r.shown) return; // 已被页面改成别的内容，由观察者处理
       const write = (v) => (name === null ? (node.data = v) : node.setAttribute(name, v));
       if (Object.hasOwn(set, r.core)) {
+        if (name === null) settled(node);
         r.shown = r.a + set[r.core] + r.b;
         if (cur !== r.shown) write(r.shown);
       } else if (del.has(r.core)) {
