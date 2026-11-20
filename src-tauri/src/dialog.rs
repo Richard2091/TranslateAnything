@@ -1,4 +1,4 @@
-//! 系统对话框：选择文件夹 / 程序、在资源管理器中定位文件。直接调 Windows 外壳接口，不额外引入插件。
+//! 系统对话框：选择文件夹 / 程序、在资源管理器中定位文件、用默认浏览器打开网址。直接调 Windows 外壳接口，不额外引入插件。
 
 use std::os::windows::process::CommandExt;
 use std::path::Path;
@@ -71,4 +71,13 @@ pub fn reveal(path: &Path) -> Result<(), String> {
         cmd.arg(dir);
     }
     cmd.spawn().map(|_| ()).map_err(|e| t!("err.dialog.explorer", e = e))
+}
+
+/// 交给系统外壳打开：网址用默认浏览器，程序按需弹出管理员授权
+pub fn open_url(target: &str) -> Result<(), String> {
+    std::process::Command::new("explorer")
+        .arg(target)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| t!("err.dialog.explorer", e = e))
 }

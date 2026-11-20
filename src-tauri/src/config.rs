@@ -49,9 +49,27 @@ pub struct Config {
     pub glossary: BTreeMap<String, String>,
     /// 沉浸模式：直接改写目标应用界面里的文字（目前支持 Electron/Chromium 内核应用）
     pub immersive: ImmersiveConfig,
+    /// 检查更新
+    pub update: UpdateConfig,
     /// 旧版单引擎写法，仅为兼容；有 `engines` 时忽略
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateConfig {
+    /// 启动后及常驻期间每天自动检查一次新版本（只提示，不自动安装）
+    pub auto_check: bool,
+    /// 用户选择跳过的版本号（如 `0.3.0`），该版本不再提示
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub skip_version: String,
+}
+
+impl Default for UpdateConfig {
+    fn default() -> Self {
+        Self { auto_check: true, skip_version: String::new() }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -158,6 +176,7 @@ impl Default for Config {
             builtin_glossary: true,
             glossary: BTreeMap::new(),
             immersive: ImmersiveConfig::default(),
+            update: UpdateConfig::default(),
             provider: None,
         }
     }

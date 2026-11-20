@@ -10,6 +10,10 @@
 //! 坐标约定：实时循环维护"累计滚动量" `total`（自上次几何变化起，内容总共平移了多少）。
 //! 每次 OCR 记下开始时的 `total` 作为该版面的基准 `base`；前端把版面整体平移 `total - base`，
 //! 这样 OCR 期间发生的滚动也不会让译文"弹回"。
+//!
+//! 整体位移按全框估计，框里固定不动的部分（标题栏、侧栏、视频字幕）不该跟着走：
+//! 每次估出位移后逐块核对原位置的画面，没动的块"钉"在屏幕坐标上（`Anchor::pinned`），
+//! 前端把它们放进不随滚动平移的图层，避免这些译文漂离原文。
 
 use crate::capture;
 use crate::config;
@@ -112,6 +116,69 @@ struct RenderBlock {
     #[serde(flatten)]
     block: Block,
     text: String,
+    /// 钉在屏幕上（x / y 为相对翻译框的当前位置，不随滚动平移）
+    pinned: bool,
+}
+
+/// 块在哪个坐标系里：随滚动平移（版面坐标，对应基准滚动量 `base`）或钉在屏幕上
+#[derive(Clone, Copy, Debug)]
+struct Anchor {
+    pinned: bool,
+    x: f32,
+    y: f32,
+}
+
+impl Anchor {
+    fn of(b: &Block) -> Self {
+        Self { pinned: false, x: b.x, y: b.y }
+    }
+
+    /// 累计滚动量为 `total` 时块在屏幕上（相对翻译框）的位置
+    fn screen(self, total: [i32; 2], base: [i32; 2]) -> (f32, f32) {
+        if self.pinned {
+            (self.x, self.y)
+        } else {
+            (self.x + (total[0] - base[0]) as f32, self.y + (total[1] - base[1]) as f32)
+        }
+    }
+}
+
+/// 块在截图（Frame）里的矩形：屏幕位置减去截图裁剪偏移
+fn frame_rect(b: &Block, (sx, sy): (f32, f32), (ox, oy): (i32, i32)) -> (i32, i32, i32, i32) {
+    (sx.round() as i32 - ox, sy.round() as i32 - oy, b.w.round() as i32, b.h.round() as i32)
+}
+
+/// 内容在 `a` → `b` 之间整体平移了 `d`：逐块核对，原地没动的钉住、钉住后又跟着走的放回滚动层。
+/// `before` / `after` 为 `a` / `b` 两帧的累计滚动量；返回是否有块换了图层
+fn reclassify(
+    blocks: &[Block],
+    anchors: &mut [Anchor],
+    (a, b): (&Frame, &Frame),
+    d: (i32, i32),
+    (before, after, base): ([i32; 2], [i32; 2], [i32; 2]),
+    off: (i32, i32),
+) -> bool {
+    let mut changed = false;
+    for (blk, anchor) in blocks.iter().zip(anchors.iter_mut()) {
+        let pos = anchor.screen(before, base);
+        match (anchor.pinned, motion::classify_region(a, b, frame_rect(blk, pos, off), d)) {
+            (false, Some(motion::RegionMotion::Static)) => {
+                *anchor = Anchor { pinned: true, x: pos.0, y: pos.1 };
+                changed = true;
+            }
+            (true, Some(motion::RegionMotion::Moved)) => {
+                // 换回版面坐标：使它在 after 时出现在 pos + d
+                *anchor = Anchor {
+                    pinned: false,
+                    x: pos.0 + d.0 as f32 - (after[0] - base[0]) as f32,
+                    y: pos.1 + d.1 as f32 - (after[1] - base[1]) as f32,
+                };
+                changed = true;
+            }
+            _ => {}
+        }
+    }
+    changed
 }
 
 /// 内容滚动：当前累计滚动量（发绝对值而非增量，丢一两条也不会累积误差）
@@ -273,17 +340,23 @@ struct Shared {
 struct OcrDone {
     epoch: u32,
     base: [i32; 2],
+    /// 识别的那一帧（灰度），结果到达时与最新画面对比，找出识别期间没随滚动移动的块
+    frame: Arc<Frame>,
+    /// 截图裁剪偏移
+    off: (i32, i32),
     result: Result<Vec<Block>, String>,
 }
 
 async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
     let shared = Arc::new(Mutex::new(Shared::default()));
-    let mut prev: Option<Frame> = None;
+    let mut prev: Option<Arc<Frame>> = None;
     let mut last_rect: Option<(i32, i32, u32, u32)> = None;
     let mut observed_revision = ctl.geometry.lock().unwrap().revision;
     let mut last_scale = 1.0;
     // 当前版面及其基准滚动量
     let mut blocks: Vec<Block> = Vec::new();
+    // 与 blocks 一一对应：随滚动平移还是钉在屏幕上
+    let mut anchors: Vec<Anchor> = Vec::new();
     let mut base = [0i32; 2];
     let mut ocr_error: Option<String> = None;
     // 累计滚动量与几何变化计数
@@ -376,6 +449,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             total = [0, 0];
             base = [0, 0];
             blocks.clear();
+            anchors.clear();
             prev = None;
             ocr_stale = true;
             ocr_error = None;
@@ -401,7 +475,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             continue;
         }
         let (image, frame, ox, oy, shot_at, cap_time, gray_time) = match shot {
-            Ok(Ok(v)) => v,
+            Ok(Ok((image, frame, ox, oy, at, c, g))) => (image, Arc::new(frame), ox, oy, at, c, g),
             Ok(Err(e)) => {
                 ocr_error = Some(e);
                 continue;
@@ -418,8 +492,15 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             // 内容滚动：立即推送新的累计位移，前端马上平移现有译文
             moving = false;
             if let Some((dx, dy)) = prev.as_ref().and_then(|p| motion::estimate_shift(p, &frame)) {
+                let before = total;
                 total[0] += dx;
                 total[1] += dy;
+                // 固定不动的块钉住、不随整体位移漂走；换了图层要重新推送版面
+                if let Some(p) = &prev {
+                    if reclassify(&blocks, &mut anchors, (&**p, &*frame), (dx, dy), (before, total, base), (ox, oy)) {
+                        ctl.dirty.store(true, Ordering::Relaxed);
+                    }
+                }
                 let age = shot_at.elapsed().as_millis() as u32;
                 let _ = app.emit_to(&label, "shift", ShiftPayload { epoch, total, age, sent: unix_ms() });
                 moving = dx != 0 || dy != 0;
@@ -427,7 +508,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             }
             ocr_stale = true;
             last_change = Instant::now();
-            prev = Some(frame);
+            prev = Some(frame.clone());
         } else if moving && shot_at.saturating_duration_since(last_move) >= STILL_AFTER {
             // 画面停了：补发一次不变的位移（截屏比界面刷新快时相邻两帧可能相同，所以要静止一小段才算）
             moving = false;
@@ -446,7 +527,23 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             if done.epoch == epoch {
                 match done.result {
                     Ok(b) => {
+                        // 上一版里钉住的块：同样的文字出现在同一位置的继续钉住，下次滚动时不必先漂一下再纠正
+                        let mut next: Vec<Anchor> = b
+                            .iter()
+                            .map(|nb| {
+                                let kept = blocks.iter().zip(&anchors).any(|(ob, oa)| {
+                                    oa.pinned && ob.source == nb.source && (oa.x - nb.x).abs() < 4.0 && (oa.y - nb.y).abs() < 4.0
+                                });
+                                Anchor { pinned: kept, ..Anchor::of(nb) }
+                            })
+                            .collect();
+                        // 识别期间画面又滚动过：没跟着动的块直接钉在识别时的位置
+                        let d = (total[0] - done.base[0], total[1] - done.base[1]);
+                        if let Some(p) = prev.as_ref().filter(|_| d != (0, 0)) {
+                            reclassify(&b, &mut next, (&*done.frame, &**p), d, (done.base, total, done.base), done.off);
+                        }
                         blocks = b;
+                        anchors = next;
                         base = done.base;
                         ocr_error = None;
                     }
@@ -460,7 +557,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         if ocr_stale && !s.ocr_busy {
             ocr_stale = false;
             s.ocr_busy = true;
-            let (shared, ctl, ocr_base, ocr_epoch) = (shared.clone(), ctl.clone(), total, epoch);
+            let (shared, ctl, ocr_base, ocr_epoch, ocr_frame) = (shared.clone(), ctl.clone(), total, epoch, frame.clone());
             tauri::async_runtime::spawn_blocking(move || {
                 let cfg = config::load().unwrap_or_default();
                 let skip_cjk = cfg.target_lang.to_ascii_lowercase().starts_with("zh");
@@ -493,6 +590,8 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                 s.ocr_done = Some(OcrDone {
                     epoch: ocr_epoch,
                     base: ocr_base,
+                    frame: ocr_frame,
+                    off: (ox, oy),
                     result,
                 });
                 ctl.dirty.store(true, Ordering::Relaxed);
@@ -546,10 +645,12 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             total,
             blocks: blocks
                 .iter()
-                .filter_map(|b| {
+                .zip(&anchors)
+                .filter_map(|(b, a)| {
                     s.cache.get(&b.source).map(|t| RenderBlock {
-                        block: b.clone(),
+                        block: Block { x: a.x, y: a.y, ..b.clone() },
                         text: t.clone(),
+                        pinned: a.pinned,
                     })
                 })
                 .collect(),

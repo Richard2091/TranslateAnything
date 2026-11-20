@@ -27,6 +27,8 @@ interface Block {
   source: string;
   text: string;
   marker?: { text: string; indent: number; offset: number };
+  /** 钉在屏幕上：原地没动的块（固定的标题栏、侧栏、字幕），x / y 为当前位置，不随滚动平移 */
+  pinned?: boolean;
 }
 
 interface Layout {
@@ -63,6 +65,7 @@ type ResizeDir =
 
 const win = getCurrentWindow();
 const blocksEl = document.getElementById("blocks")!;
+const pinnedEl = document.getElementById("pinned")!;
 const statusEl = document.getElementById("status")!;
 const errorEl = document.getElementById("error")!;
 const modeStatusEl = document.getElementById("mode-status")!;
@@ -186,6 +189,7 @@ function render(layout: Layout) {
   applyOffset();
   kick();
   const frag = document.createDocumentFragment();
+  const pinnedFrag = document.createDocumentFragment();
   const toFit: [HTMLElement, Block][] = [];
   for (const b of layout.blocks) {
     const el = document.createElement("div");
@@ -213,10 +217,11 @@ function render(layout: Layout) {
     } else {
       el.textContent = b.text;
     }
-    frag.appendChild(el);
+    (b.pinned ? pinnedFrag : frag).appendChild(el);
     toFit.push([el, b]);
   }
   blocksEl.replaceChildren(frag);
+  pinnedEl.replaceChildren(pinnedFrag);
   for (const [el, b] of toFit) fitText(el, b);
 
   lastLayout = layout;
@@ -344,6 +349,7 @@ function onGeometryChange() {
   cancelAnimationFrame(rafId);
   rafId = 0;
   blocksEl.replaceChildren();
+  pinnedEl.replaceChildren();
 }
 const geometryListeners = Promise.all([
   win.onMoved(onGeometryChange),
@@ -383,6 +389,7 @@ btnPause.addEventListener("click", () => {
 btnOriginal.addEventListener("click", () => {
   showOriginal = !showOriginal;
   blocksEl.classList.toggle("hidden", showOriginal);
+  pinnedEl.classList.toggle("hidden", showOriginal);
   updateTranslationControls();
 });
 

@@ -44,6 +44,7 @@ export interface Config {
   immersive: { enabled: boolean; hotkey: string; targets: ImmersiveTarget[] };
   /** 界面语言；空或缺省表示跟随系统 */
   ui_lang?: string;
+  update: { auto_check: boolean; skip_version?: string };
   [key: string]: unknown;
 }
 
@@ -82,6 +83,23 @@ export interface EngineInfo {
   default_base_url: string;
 }
 
+export interface AppVersion {
+  version: string;
+  arch: string;
+  portable: boolean;
+  repo: string;
+}
+
+export interface UpdateInfo {
+  current: string;
+  latest: string;
+  newer: boolean;
+  url: string;
+  published_at: string;
+  asset_name: string | null;
+  asset_size: number;
+}
+
 export interface StoreStats {
   total: number;
   manual: number;
@@ -104,6 +122,15 @@ export const S = {
   stats: null as StoreStats | null,
   frames: 0,
   ocrLangs: null as { tag: string; name: string }[] | null,
+  version: null as AppVersion | null,
+  /** 最近一次检查更新的结果；checking / installing 为进行中，progress 为下载进度（百分比） */
+  update: {
+    info: null as UpdateInfo | null,
+    checking: false,
+    installing: false,
+    progress: 0,
+    error: "",
+  },
   /** 各引擎最近一次测试结果（按引擎 id） */
   tests: {} as Record<string, { busy: boolean; result?: EngineTest; error?: string }>,
 };

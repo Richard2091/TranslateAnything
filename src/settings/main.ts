@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { S, loadStats, loadView, setRerender, type EngineInfo, type TargetStatus } from "./state";
+import { S, loadStats, loadView, setRerender, type AppVersion, type EngineInfo, type TargetStatus, type UpdateInfo } from "./state";
 import { errText, h } from "./ui";
 import { setNav } from "./nav";
 import { renderDashboard } from "./pages/dashboard";
@@ -158,11 +158,15 @@ setInterval(async () => {
   void syncMaximized();
   try {
     await loadView();
-    [S.statuses, S.catalog] = await Promise.all([
+    [S.statuses, S.catalog, S.version, S.update.info] = await Promise.all([
       invoke<TargetStatus[]>("immersive_status"),
       invoke<EngineInfo[]>("engine_catalog"),
+      invoke<AppVersion>("app_version"),
+      invoke<UpdateInfo | null>("update_state"),
     ]);
-    await switchTab("dashboard");
+    // 从托盘"发现新版本"打开时直接到常规页
+    const goto = await invoke<string | null>("settings_take_goto").catch(() => null);
+    await switchTab(goto && PAGES[goto] ? goto : "dashboard");
   } catch (e) {
     rootOf("dashboard").replaceChildren(h("div", { class: "note bad" }, t("settings.loadFailed", { error: errText(e) })));
     rootOf("dashboard").classList.add("active");
@@ -173,6 +177,18 @@ setInterval(async () => {
     resetGlossaryDraft();
     if (current === "glossary" && glossaryDirty()) return;
     if (current !== "library") backgroundRender();
+  });
+  await listen<string>("settings-goto", (e) => {
+    void invoke("settings_take_goto");
+    if (PAGES[e.payload] && current !== e.payload) void switchTab(e.payload);
+  });
+  await listen<UpdateInfo>("update-state", (e) => {
+    S.update.info = e.payload;
+    if (current === "general" || current === "dashboard") backgroundRender();
+  });
+  await listen<number>("update-progress", (e) => {
+    S.update.progress = e.payload;
+    if (current === "general") backgroundRender();
   });
   await listen<TargetStatus[]>("immersive-status", (e) => {
     S.statuses = e.payload;

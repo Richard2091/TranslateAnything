@@ -431,6 +431,17 @@ fn build_client(cfg: &ProviderConfig) -> Result<reqwest::Client, TranslateError>
         .map_err(|e| TranslateError::Config(e.to_string()))
 }
 
+/// 只按代理设置构造 HTTP 客户端（检查更新等非翻译请求用）；`proxy` 取值同 [`build_client`]
+pub fn proxy_client(proxy: &str, timeout: Duration) -> Result<reqwest::Client, TranslateError> {
+    let mut builder = reqwest::Client::builder().connect_timeout(Duration::from_secs(10)).timeout(timeout);
+    builder = match proxy.trim() {
+        "system" => builder,
+        "" | "direct" => builder.no_proxy(),
+        p => builder.proxy(reqwest::Proxy::all(p).map_err(|e| TranslateError::Config(t!("err.engine.bad_proxy", e = e)))?),
+    };
+    builder.build().map_err(|e| TranslateError::Config(e.to_string()))
+}
+
 fn require_key(cfg: &ProviderConfig, hint: &str) -> Result<String, TranslateError> {
     let key = cfg.api_key.trim();
     if key.is_empty() || key == "sk-xxx" || key.contains("在此填写") {

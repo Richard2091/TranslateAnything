@@ -65,15 +65,24 @@ fn build_menu(app: &AppHandle, list: &[TargetStatus]) -> tauri::Result<Menu<Wry>
         menu.append(&CheckMenuItem::with_id(app, id, text, s.state != State::Off, s.enabled, None::<&str>)?)?;
     }
     menu.append(&PredefinedMenuItem::separator(app)?)?;
+    if let Some(u) = crate::update::pending() {
+        menu.append(&MenuItem::with_id(app, "update", t!("tray.update", version = u.latest), true, None::<&str>)?)?;
+    }
     menu.append(&MenuItem::with_id(app, "settings", t!("tray.settings"), true, None::<&str>)?)?;
     menu.append(&MenuItem::with_id(app, "quit", t!("tray.quit"), true, None::<&str>)?)?;
     Ok(menu)
 }
 
+/// 立即按当前状态重建托盘菜单（检查到新版本、跳过版本后调用）
+pub fn refresh_now(app: &AppHandle) {
+    refresh(app, &immersive::statuses(app));
+}
+
 /// 应用状态变化后更新托盘菜单
 pub fn refresh(app: &AppHandle, list: &[TargetStatus]) {
     let sig: Vec<_> = list.iter().map(|s| (s.port, &s.name, s.enabled, s.state, s.show)).collect();
-    let sig = format!("{}{sig:?}", crate::i18n::locale());
+    let update = crate::update::pending().map(|u| u.latest);
+    let sig = format!("{}{update:?}{sig:?}", crate::i18n::locale());
     {
         let mut last = LAST.lock().unwrap();
         if *last == sig {
@@ -107,6 +116,9 @@ fn on_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
         }
         "settings" => {
             let _ = settings::open_settings(app);
+        }
+        "update" => {
+            let _ = settings::open_settings_at(app, "general");
         }
         "quit" => {
             let app = app.clone();

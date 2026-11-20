@@ -106,15 +106,20 @@ body.drag-mode:active { cursor: grabbing; }
 
 body.drag-mode #lens { opacity: 1; }
 
-#blocks {
+#blocks,
+#pinned {
   position: absolute;
   inset: 0;
   overflow: hidden;
-  will-change: transform;
   pointer-events: none;
 }
 
-#blocks.hidden {
+#blocks {
+  will-change: transform;
+}
+
+#blocks.hidden,
+#pinned.hidden {
   visibility: hidden;
 }
 

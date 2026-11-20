@@ -10,6 +10,21 @@ use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
 
 const SETTINGS_LABEL: &str = "settings";
 
+/// 下次打开设置窗口时要跳到的页面（托盘"发现新版本"用）
+static GOTO: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);
+
+/// 打开设置窗口并跳到指定页面：已打开的窗口收事件跳转，新窗口载入后取走 GOTO
+pub fn open_settings_at(app: &AppHandle, tab: &'static str) -> Result<(), String> {
+    *GOTO.lock().unwrap() = Some(tab);
+    let _ = app.emit_to(SETTINGS_LABEL, "settings-goto", tab);
+    open_settings(app)
+}
+
+#[tauri::command]
+pub fn settings_take_goto() -> Option<&'static str> {
+    GOTO.lock().unwrap().take()
+}
+
 /// 打开设置窗口（已打开则调到前台）
 pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     if let Some(w) = app.get_webview_window(SETTINGS_LABEL) {
@@ -80,6 +95,9 @@ pub fn settings_save(app: AppHandle, mut config: Config) -> Result<(), String> {
     }
     apply_ui_lang(&app, &config.ui_lang);
     immersive::reload(&app);
+    if config.update.skip_version != previous.update.skip_version {
+        crate::tray::refresh_now(&app);
+    }
     Ok(())
 }
 
@@ -280,4 +298,31 @@ pub fn reveal_file(which: String) -> Result<(), String> {
 #[tauri::command]
 pub fn frames_close_all(app: AppHandle) -> usize {
     crate::live::close_all_frames(&app)
+}
+
+#[tauri::command]
+pub fn app_version() -> crate::update::AppVersion {
+    crate::update::current()
+}
+
+/// 最近一次检查更新的结果（还没检查过为空）
+#[tauri::command]
+pub fn update_state() -> Option<crate::update::UpdateInfo> {
+    crate::update::last_checked()
+}
+
+#[tauri::command]
+pub async fn update_check(app: AppHandle) -> Result<crate::update::UpdateInfo, String> {
+    crate::update::check(&app).await
+}
+
+/// 下载并启动新版本的安装程序（成功后本程序退出）；便携版打开下载页
+#[tauri::command]
+pub async fn update_install(app: AppHandle) -> Result<(), String> {
+    crate::update::install(&app).await
+}
+
+#[tauri::command]
+pub fn update_open_page() -> Result<(), String> {
+    crate::update::open_page()
 }

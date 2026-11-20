@@ -16,6 +16,7 @@ mod settings;
 mod store;
 mod translate;
 mod tray;
+mod update;
 mod wgc;
 
 use std::sync::OnceLock;
@@ -82,6 +83,7 @@ pub fn run() {
             if let Err(e) = tray::init(app.handle()) {
                 eprintln!("创建托盘图标失败：{e}");
             }
+            update::start(app.handle());
             // 带 --settings 启动时直接打开设置窗口
             if std::env::args().any(|a| a == "--settings") {
                 let _ = settings::open_settings(app.handle());
@@ -128,6 +130,12 @@ pub fn run() {
             settings::store_pick_and_relocate,
             settings::store_reset_location,
             settings::reveal_file,
+            settings::settings_take_goto,
+            settings::app_version,
+            settings::update_state,
+            settings::update_check,
+            settings::update_install,
+            settings::update_open_page,
         ])
         .build(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
