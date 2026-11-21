@@ -105,6 +105,8 @@ struct LayoutPayload {
     blocks: Vec<RenderBlock>,
     /// 等待翻译的块数
     pending: usize,
+    /// 正在识别画面，尚不能确定新文本块的位置
+    recognizing: bool,
     /// 最近一次错误（OCR 或翻译）
     error: Option<String>,
     /// 最近一次成功使用的引擎名
@@ -116,6 +118,8 @@ struct RenderBlock {
     #[serde(flatten)]
     block: Block,
     text: String,
+    /// 尚无译文：前端保留屏幕上的原文，只画等待指示器
+    loading: bool,
     /// 钉在屏幕上（x / y 为相对翻译框的当前位置，不随滚动平移）
     pinned: bool,
 }
@@ -328,6 +332,7 @@ pub fn frame_set_click_through(window: WebviewWindow, state: tauri::State<'_, Li
 struct Shared {
     cache: HashMap<String, String>,
     in_flight: bool,
+    epoch: u32,
     error: Option<String>,
     failed_at: Option<Instant>,
     engine: Option<String>,
@@ -377,6 +382,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
     })));
     // 耗时日志：本轮从画面变化起算，直到译文全部上屏
     let mut round_start: Option<Instant> = None;
+    let mut translation_task: Option<tauri::async_runtime::JoinHandle<()>> = None;
 
     loop {
         let geometry = *ctl.geometry.lock().unwrap();
@@ -450,6 +456,14 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             base = [0, 0];
             blocks.clear();
             anchors.clear();
+            {
+                if let Some(task) = translation_task.take() { task.abort(); }
+                let mut s = shared.lock().unwrap();
+                s.in_flight = false;
+                s.error = None;
+                s.failed_at = None;
+                s.epoch = epoch;
+            }
             prev = None;
             ocr_stale = true;
             ocr_error = None;
@@ -478,6 +492,12 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             Ok(Ok((image, frame, ox, oy, at, c, g))) => (image, Arc::new(frame), ox, oy, at, c, g),
             Ok(Err(e)) => {
                 ocr_error = Some(e);
+                ocr_stale = true;
+                prev = None;
+                let _ = app.emit_to(&label, "layout", LayoutPayload {
+                    epoch, base, total, blocks: Vec::new(), pending: 0, recognizing: false,
+                    error: ocr_error.clone(), engine: None,
+                });
                 continue;
             }
             Err(_) => continue,
@@ -521,6 +541,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         }
 
         let mut s = shared.lock().unwrap();
+        let was_recognizing = s.ocr_busy;
 
         // 取走已完成的 OCR 结果（几何变化前发起的作废）
         if let Some(done) = s.ocr_done.take() {
@@ -556,6 +577,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         // 画面有变化且没有 OCR 在跑：识别最新这一帧（OCR 期间的滚动由 total - base 补偿）
         if ocr_stale && !s.ocr_busy {
             ocr_stale = false;
+            ocr_error = None;
             s.ocr_busy = true;
             let (shared, ctl, ocr_base, ocr_epoch, ocr_frame) = (shared.clone(), ctl.clone(), total, epoch, frame.clone());
             tauri::async_runtime::spawn_blocking(move || {
@@ -609,11 +631,18 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         let can_retry = s.failed_at.is_none_or(|t| t.elapsed() > RETRY_AFTER);
         if !missing.is_empty() && !s.in_flight && can_retry {
             s.in_flight = true;
+            s.error = None;
+            ctl.dirty.store(true, Ordering::Relaxed);
+            let request_epoch = epoch;
             let (shared, ctl) = (shared.clone(), ctl.clone());
-            tauri::async_runtime::spawn(async move {
+            translation_task = Some(tauri::async_runtime::spawn(async move {
                 let cfg = config::load().unwrap_or_default();
-                let result = translate::translate_batch_with_fallback(&cfg, &missing, "悬浮窗").await;
+                let result = tokio::time::timeout(
+                    Duration::from_secs(90),
+                    translate::translate_batch_with_fallback(&cfg, &missing, "悬浮窗"),
+                ).await.unwrap_or_else(|_| Err(t!("err.engine.timeout")));
                 let mut s = shared.lock().unwrap();
+                if s.epoch != request_epoch { return; }
                 s.in_flight = false;
                 match result {
                     Ok((texts, engine)) => {
@@ -625,18 +654,19 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                         s.failed_at = None;
                         s.engine = Some(engine);
                     }
-                    Err(e) => {
+                    Err(e) if request_epoch == s.epoch => {
                         s.error = Some(t!("err.engine.failed", e = e));
                         s.failed_at = Some(Instant::now());
                     }
+                    Err(_) => {} // 旧范围的失败不能污染新范围的状态
                 }
                 ctl.dirty.store(true, Ordering::Relaxed);
                 ctl.ready.notify_one();
-            });
+            }));
         }
 
         let dirty = ctl.dirty.swap(false, Ordering::Relaxed);
-        if !layout_changed && !dirty {
+        if !layout_changed && !dirty && was_recognizing == s.ocr_busy {
             continue;
         }
         let payload = LayoutPayload {
@@ -646,15 +676,18 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             blocks: blocks
                 .iter()
                 .zip(&anchors)
-                .filter_map(|(b, a)| {
-                    s.cache.get(&b.source).map(|t| RenderBlock {
+                .map(|(b, a)| {
+                    let translated = s.cache.get(&b.source);
+                    RenderBlock {
                         block: Block { x: a.x, y: a.y, ..b.clone() },
-                        text: t.clone(),
+                        text: translated.cloned().unwrap_or_default(),
+                        loading: translated.is_none() && (s.in_flight || s.error.is_none()) && ocr_error.is_none(),
                         pinned: a.pinned,
-                    })
+                    }
                 })
                 .collect(),
             pending: blocks.iter().filter(|b| !s.cache.contains_key(&b.source)).count(),
+            recognizing: s.ocr_busy,
             error: ocr_error.clone().or_else(|| s.error.clone()),
             engine: s.engine.clone(),
         };
@@ -674,6 +707,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         }
     }
 
+    if let Some(task) = translation_task { task.abort(); }
     app.state::<LiveState>().frames.lock().unwrap().remove(&label);
 }
 

@@ -222,6 +222,7 @@
   "frame.original_label": "原",
   "frame.pause": "暂停实时翻译",
   "frame.pending": "待翻译 {n} 段",
+  "frame.recognizing": "正在识别…",
   "frame.resume": "继续实时翻译",
   "frame.show_original": "显示原文",
   "frame.show_translation": "显示译文",

@@ -26,6 +26,7 @@ interface Block {
   fg: string;
   source: string;
   text: string;
+  loading: boolean;
   marker?: { text: string; indent: number; offset: number };
   /** 钉在屏幕上：原地没动的块（固定的标题栏、侧栏、字幕），x / y 为当前位置，不随滚动平移 */
   pinned?: boolean;
@@ -39,6 +40,7 @@ interface Layout {
   total: [number, number];
   blocks: Block[];
   pending: number;
+  recognizing: boolean;
   error: string | null;
   engine: string | null;
 }
@@ -68,6 +70,7 @@ const blocksEl = document.getElementById("blocks")!;
 const pinnedEl = document.getElementById("pinned")!;
 const statusEl = document.getElementById("status")!;
 const errorEl = document.getElementById("error")!;
+const loadingEl = document.getElementById("loading-status")!;
 const modeStatusEl = document.getElementById("mode-status")!;
 const btnMode = document.getElementById("btn-mode")!;
 const btnPause = document.getElementById("btn-pause")!;
@@ -171,7 +174,10 @@ function kick() {
 let lastLayout: Layout | null = null;
 
 function updateStatus(layout: Layout) {
-  statusEl.className = layout.error ? "err" : layout.pending > 0 ? "busy" : "";
+  const busy = !paused && !showOriginal && (layout.recognizing || layout.pending > 0) && !layout.error;
+  statusEl.className = layout.error ? "err" : busy ? "busy" : "";
+  loadingEl.hidden = !busy;
+  loadingEl.textContent = t(layout.recognizing ? "frame.recognizing" : "frame.pending", { n: layout.pending });
   statusEl.title = [
     layout.engine ? t("frame.engine", { name: layout.engine }) : "",
     layout.pending > 0 ? t("frame.pending", { n: layout.pending }) : "",
@@ -192,6 +198,22 @@ function render(layout: Layout) {
   const pinnedFrag = document.createDocumentFragment();
   const toFit: [HTMLElement, Block][] = [];
   for (const b of layout.blocks) {
+    if (b.loading) {
+      const loader = document.createElement("div");
+      loader.className = "block-loading";
+      loader.setAttribute("aria-hidden", "true");
+      // 优先放在块右侧空白处，靠近边界时退回块内右上角；不遮盖整段原文。
+      const size = Math.min(14, Math.max(9, css(b.font) * 0.7));
+      const right = css(b.x + b.w) + 3;
+      Object.assign(loader.style, {
+        left: `${Math.max(0, right + size < window.innerWidth - 4 ? right : css(b.x + b.w) - size)}px`,
+        top: `${Math.max(0, css(b.y))}px`,
+        width: `${size}px`, height: `${size}px`, color: b.fg, background: b.bg,
+      });
+      (b.pinned ? pinnedFrag : frag).appendChild(loader);
+      continue;
+    }
+    if (!b.text) continue;
     const el = document.createElement("div");
     el.className = "block";
     Object.assign(el.style, {
@@ -291,6 +313,7 @@ function updateTranslationControls() {
   btnOriginal.title = originalLabel;
   btnOriginal.setAttribute("aria-label", originalLabel);
   btnOriginal.classList.toggle("on", showOriginal);
+  if (lastLayout) updateStatus(lastLayout);
 }
 
 /** 边框线宽（物理像素），与框选遮罩的选区边框一致 */
@@ -346,6 +369,12 @@ function onGeometryChange() {
   // 同一轮移动/缩放只清理一次，拒收旧范围的布局与位移。
   if (minEpoch > epoch) return;
   minEpoch = epoch + 1;
+  lastLayout = null;
+  loadingEl.hidden = true;
+  statusEl.className = "";
+  statusEl.title = "";
+  errorEl.textContent = "";
+  errorEl.hidden = true;
   cancelAnimationFrame(rafId);
   rafId = 0;
   blocksEl.replaceChildren();
@@ -388,6 +417,7 @@ btnPause.addEventListener("click", () => {
 
 btnOriginal.addEventListener("click", () => {
   showOriginal = !showOriginal;
+  document.body.classList.toggle("show-original", showOriginal);
   blocksEl.classList.toggle("hidden", showOriginal);
   pinnedEl.classList.toggle("hidden", showOriginal);
   updateTranslationControls();

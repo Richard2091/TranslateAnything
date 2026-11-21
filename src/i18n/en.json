@@ -222,6 +222,7 @@
   "frame.original_label": "Src",
   "frame.pause": "Pause live translation",
   "frame.pending": "{n} block(s) pending",
+  "frame.recognizing": "Recognizing…",
   "frame.resume": "Resume live translation",
   "frame.show_original": "Show original",
   "frame.show_translation": "Show translation",

@@ -143,6 +143,28 @@ body.drag-mode #lens { opacity: 1; }
   white-space: nowrap;
 }
 
+/* 等待块只画小圈，保留底下的原文；与译文共用滚动/钉住坐标系。 */
+.block-loading {
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.block-loading::after, #loading-status::before {
+  content: "";
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-bottom-color: transparent;
+  border-radius: 50%;
+  animation: loading-spin .8s linear infinite;
+}
+body.paused .block-loading, body.show-original .block-loading { display: none; }
+@keyframes loading-spin { to { transform: rotate(360deg); } }
+
 /* 线宽由 main.ts 对齐物理像素，圆角仅由全局设置决定。 */
 #border {
   position: absolute;
@@ -293,7 +315,7 @@ body.paused #btn-pause .icon-play {
 body:is(.hover, .drag-mode:hover, .interaction-error, .mode-notice) #notices,
 #toolbar:is(:hover, :has(button:focus-visible)) + #notices { opacity: 1; }
 
-#mode-status, #error {
+#loading-status, #mode-status, #error {
   max-width: min(360px, 100%);
   box-sizing: border-box;
   overflow: hidden;
@@ -302,6 +324,18 @@ body:is(.hover, .drag-mode:hover, .interaction-error, .mode-notice) #notices,
   box-shadow: inset 0 0 0 1px var(--line);
   color: var(--text);
   padding: 3px 7px;
+}
+
+#notices:has(#loading-status:not([hidden])) { opacity: 1; }
+#loading-status:not([hidden]) { display: flex; align-items: center; gap: 6px; flex: none; }
+#loading-status::before { width: 11px; height: 11px; flex: none; color: var(--accent); }
+/* 单行小框也能看到整体识别状态，不依赖鼠标悬停。 */
+@media (max-height: 68px) {
+  #notices:has(#loading-status:not([hidden])) { top: var(--edge); align-items: flex-start; }
+  #loading-status { max-width: max(16px, calc(100% - var(--toolbar-w) - 4px)); white-space: nowrap; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .block-loading::after, #loading-status::before { animation: none; }
 }
 
 #mode-status { flex: none; white-space: nowrap; text-overflow: ellipsis; }
