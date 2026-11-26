@@ -13,6 +13,7 @@ mod live;
 mod motion;
 mod ocr;
 mod settings;
+mod single_instance;
 mod store;
 mod translate;
 mod tray;
@@ -26,8 +27,19 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 /// 沉浸模式"译文 / 原文"切换快捷键（注册成功后记下，用来区分是哪个快捷键触发）
 static IMMERSIVE_HOTKEY: OnceLock<Shortcut> = OnceLock::new();
 
+/// 启动随译，整个运行期间持有单实例锁。
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 在注册快捷键、创建托盘或读取用户配置之前拦截重复启动。
+    let instance = match single_instance::acquire() {
+        Ok(Some(instance)) => instance,
+        Ok(None) => return,
+        Err(e) => {
+            eprintln!("获取单实例锁失败：{e}");
+            std::process::exit(1);
+        }
+    };
+
     let app = tauri::Builder::default()
         .manage(commands::AppState::default())
         .manage(live::LiveState::default())
@@ -140,7 +152,7 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("启动 Tauri 应用失败");
 
-    app.run(|_app, event| {
+    let code = app.run_return(|_app, event| {
         // 所有窗口关闭后继续常驻后台（托盘菜单"退出"才真正退出）
         if let RunEvent::ExitRequested { api, code, .. } = event {
             if code.is_none() {
@@ -148,4 +160,7 @@ pub fn run() {
             }
         }
     });
+    // 完成事件循环清理后，在获取锁的线程释放它，再按 Tauri 的退出码退出。
+    drop(instance);
+    std::process::exit(code);
 }
