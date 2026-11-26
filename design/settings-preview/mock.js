@@ -42,7 +42,13 @@
     { id: "google", name: "Google Cloud 翻译（官方 API）", needs_key: true, official: true, fields: ["api_key", "base_url", "proxy"], note: "需启用 Cloud Translation API；国内需配置代理" },
     { id: "openai", name: "大模型（OpenAI 兼容）", needs_key: true, official: true, fields: ["base_url", "api_key", "model", "proxy"], note: "任意 OpenAI 兼容服务" },
   ];
+  let autostartEnabled = false;
   const handlers = {
+    autostart_status: () => autostartEnabled ? "enabled" : "disabled",
+    autostart_set: ({ enabled }) => {
+      autostartEnabled = enabled;
+      return enabled ? "enabled" : "disabled";
+    },
     // 界面语言：地址加 ?lang=en 预览英文界面，缺的键按后端规则回退到英文
     ui_i18n: async () => {
       const lang = new URLSearchParams(location.search).get("lang") || "zh-CN";

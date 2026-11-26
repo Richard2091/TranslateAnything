@@ -282,7 +282,7 @@ pub(crate) fn status_of(app: &AppHandle, port: u16) -> Option<SharedStatus> {
 
 // ───────────────────────── 守护任务 ─────────────────────────
 
-/// 应用启动不超过这么久才自动重启；更早打开的可能已有用户数据，留给用户点"以沉浸模式重启"
+/// 只尝试自动切换刚打开的应用；更早打开的留给用户手动重启。
 const AUTO_FRESH: Duration = Duration::from_secs(30);
 /// 两次自动重启的最小间隔
 const AUTO_COOLDOWN: Duration = Duration::from_secs(120);
@@ -409,7 +409,7 @@ async fn supervise(
                         }
                     }
                 };
-                // 用户直接打开了应用（没带调试端口）：趁它刚启动、还没有用户数据，自动重启成沉浸模式
+                // 用户刚直接打开了应用（没带调试端口）：尝试正常退出并重启成沉浸模式。
                 if state == State::NoPort
                     && idle
                     && t.auto_relaunch

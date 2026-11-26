@@ -5,8 +5,8 @@
 //! 把它退出，再用同样的参数加上调试端口重新打开。
 //! 这类应用多是单实例的，不先退出的话新启动的进程会把参数转交给旧实例然后自己退出，端口开不起来。
 //!
-//! 退出方式：先请窗口关闭，几秒内没退（带托盘的应用关窗口只是藏起来）就强制结束。
-//! 刚打开的应用（自动接管）里还没有用户数据，直接结束。WebView2 应用结束的是宿主程序，
+//! 退出方式：先请窗口关闭。只有用户手动发起切换时，几秒内没退才强制结束。
+//! 自动切换若没能正常退出，留给用户处理。WebView2 应用退出的是宿主程序，
 //! 它的 msedgewebview2.exe 浏览器进程随之退出。
 //!
 //! 调试端口怎么带：Electron / CEF 加命令行参数 `--remote-debugging-port`；
@@ -21,14 +21,14 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-/// 请窗口关闭后等应用自己退出的时间，过后强制结束
+/// 请窗口关闭后等待应用退出的时间。
 const GRACEFUL: Duration = Duration::from_secs(4);
 /// 强制结束后等进程消失的最长时间
 const WAIT_GONE: Duration = Duration::from_secs(10);
 
 /// 以沉浸模式启动（或重启）配置里端口为 `port` 的应用，返回给人看的结果。
-/// `graceful` 为 false 时不请窗口关闭，直接结束（用于刚打开就被自动接管的应用）
-pub async fn launch(app: &AppHandle, port: u16, graceful: bool) -> Result<String, String> {
+/// `allow_force` 仅在用户手动发起切换时为 true。
+pub async fn launch(app: &AppHandle, port: u16, allow_force: bool) -> Result<String, String> {
     let cfg = config::load()?;
     let target = cfg
         .immersive
@@ -37,6 +37,10 @@ pub async fn launch(app: &AppHandle, port: u16, graceful: bool) -> Result<String
         .find(|t| t.port == port)
         .cloned()
         .ok_or_else(|| t!("err.immersive.no_config"))?;
+    // 守护任务排队后，用户可能已经关闭总开关或停用这一项。
+    if !allow_force && !(cfg.immersive.enabled && target.enabled && target.auto_relaunch) {
+        return Ok(String::new());
+    }
     let exe = PathBuf::from(target.exe.trim());
     if target.exe.trim().is_empty() || !exe.exists() {
         return Err(t!("err.immersive.bad_exe", path = target.exe));
@@ -54,13 +58,16 @@ pub async fn launch(app: &AppHandle, port: u16, graceful: bool) -> Result<String
             let _ = app.emit("config-changed", ());
         }
         set_waiting(app, port, Some(t!("status.closing", name = target.name)));
-        if let Err(e) = quit(&exe, graceful).await {
+        if let Err(e) = quit(&exe, allow_force).await {
             set_waiting(app, port, None);
             return Err(e);
         }
         set_waiting(app, port, Some(t!("status.reopening")));
         // 等单实例锁释放
         tokio::time::sleep(Duration::from_secs(1)).await;
+    } else if !allow_force {
+        // 用户已把程序关掉，自动任务不要把它重新打开。
+        return Ok(String::new());
     }
 
     let args = config::load()?
@@ -83,8 +90,8 @@ pub async fn launch(app: &AppHandle, port: u16, graceful: bool) -> Result<String
     Ok(t!("status.launched", name = target.name))
 }
 
-/// 退出程序的所有进程：先请窗口关闭，没退就强制结束
-async fn quit(exe: &Path, graceful: bool) -> Result<(), String> {
+/// 请求正常退出。手动重启时才允许强制结束仍在运行的进程。
+async fn quit(exe: &Path, allow_force: bool) -> Result<(), String> {
     let pids_now = |e: PathBuf| blocking(move || procs::pids_of(&e));
     let wait_gone = async |limit: Duration| {
         let start = Instant::now();
@@ -96,17 +103,55 @@ async fn quit(exe: &Path, graceful: bool) -> Result<(), String> {
         }
         false
     };
-    if graceful {
-        let pids = pids_now(exe.to_path_buf()).await;
-        blocking(move || procs::close_windows(&pids)).await;
-        if wait_gone(GRACEFUL).await {
-            return Ok(());
-        }
+    let pids = pids_now(exe.to_path_buf()).await;
+    blocking(move || procs::close_windows(&pids)).await;
+    if wait_gone(GRACEFUL).await {
+        return Ok(());
     }
-    // 子进程会随主进程退出，这里一起结束，免得残留进程占着单实例锁
+    if !allow_force {
+        return Err(t!("err.immersive.quit_failed"));
+    }
+    // 手动重启允许结束残留进程，释放单实例锁。
     let pids = pids_now(exe.to_path_buf()).await;
     blocking(move || procs::terminate(&pids)).await;
     if wait_gone(WAIT_GONE).await { Ok(()) } else { Err(t!("err.immersive.quit_failed")) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 自动重启超时后保留进程() {
+        // 用单独目录下的 cmd 副本作为不响应窗口关闭的测试进程。
+        let dir = std::env::temp_dir().join(format!("suiyi-auto-relaunch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let exe = dir.join("suiyi-test-cmd.exe");
+        struct Cleanup(PathBuf, Option<std::process::Child>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                if let Some(child) = &mut self.1 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let mut cleanup = Cleanup(dir, None);
+        std::fs::copy(std::env::var_os("ComSpec").unwrap(), &exe).unwrap();
+        let mut child = std::process::Command::new(&exe)
+            .raw_arg("/D /Q /K")
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        cleanup.1 = Some(child);
+        assert!(tauri::async_runtime::block_on(quit(&exe, false)).is_err());
+        assert!(cleanup.1.as_mut().unwrap().try_wait().unwrap().is_none());
+    }
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {

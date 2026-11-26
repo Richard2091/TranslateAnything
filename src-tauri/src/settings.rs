@@ -6,9 +6,33 @@ use crate::{store, translate};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 const SETTINGS_LABEL: &str = "settings";
+
+/// 从设置窗口读取 Windows 登录自启动状态。
+#[tauri::command]
+pub fn autostart_status(window: WebviewWindow) -> Result<crate::autostart::Status, String> {
+    if window.label() != SETTINGS_LABEL {
+        return Err(t!("general.autostartReadFailed"));
+    }
+    crate::autostart::status().map_err(|error| {
+        eprintln!("读取开机自启动状态失败：{error}");
+        t!("general.autostartReadFailed")
+    })
+}
+
+/// 只允许设置窗口切换当前用户的登录自启动。
+#[tauri::command]
+pub fn autostart_set(window: WebviewWindow, enabled: bool) -> Result<crate::autostart::Status, String> {
+    if window.label() != SETTINGS_LABEL {
+        return Err(t!("general.autostartSaveFailed"));
+    }
+    crate::autostart::set(enabled).map_err(|error| {
+        eprintln!("更改开机自启动失败：{error}");
+        t!("general.autostartSaveFailed")
+    })
+}
 
 /// 下次打开设置窗口时要跳到的页面（托盘"发现新版本"用）
 static GOTO: std::sync::Mutex<Option<&'static str>> = std::sync::Mutex::new(None);

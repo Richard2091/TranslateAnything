@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { S, loadStats, loadView, setRerender, type AppVersion, type EngineInfo, type TargetStatus, type UpdateInfo } from "./state";
+import { S, loadStats, loadView, refresh, setRerender, type AppVersion, type EngineInfo, type TargetStatus, type UpdateInfo } from "./state";
 import { errText, h } from "./ui";
 import { setNav } from "./nav";
 import { renderDashboard } from "./pages/dashboard";
@@ -11,7 +11,7 @@ import { renderImmersive } from "./pages/immersive";
 import { renderEngines } from "./pages/engines";
 import { buildLibrary, queryLibrary } from "./pages/library";
 import { glossaryDirty, renderGlossary, resetGlossaryDraft } from "./pages/glossary";
-import { renderGeneral } from "./pages/general";
+import { loadAutostart, renderGeneral } from "./pages/general";
 import { initI18n, isZh, t } from "../i18n";
 
 type Page = { render: (root: HTMLElement) => void; onShow?: () => Promise<unknown> | void };
@@ -87,14 +87,17 @@ async function switchTab(name: string) {
   for (const b of document.querySelectorAll<HTMLButtonElement>("#nav button")) b.classList.toggle("active", b.dataset.tab === name);
   moveIndicator();
   const root = rootOf(name);
+  // 先开始读系统状态，再画出常规页，避免显示可点击的旧开关。
+  const autostart = name === "general" ? loadAutostart() : undefined;
   PAGES[name].render(root);
   for (const s of document.querySelectorAll<HTMLElement>(".tab")) s.classList.toggle("active", s === root);
   document.querySelector("main")!.scrollTop = 0;
   playEnter(root);
-  const show = PAGES[name].onShow;
-  if (show) {
-    await show();
-    if (current === name && name !== "library") backgroundRender();
+  const work = autostart ?? PAGES[name].onShow?.();
+  if (work) {
+    await work;
+    if (current === name && name === "general") refresh();
+    else if (current === name && name !== "library") backgroundRender();
   }
 }
 setNav((tab) => void switchTab(tab));
