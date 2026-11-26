@@ -7,6 +7,50 @@ import { proxyField } from "./engines";
 
 let moving = false;
 
+type AutostartStatus = "disabled" | "enabled" | "blocked" | "stale" | "portable";
+let autostart: AutostartStatus | null = null;
+let autostartBusy = false;
+let autostartError = "";
+let autostartLoad: Promise<void> | undefined;
+
+/** 读取 Windows 状态，查询期间停用开关。 */
+async function readAutostart() {
+  autostart = null;
+  autostartError = "";
+  try {
+    autostart = await invoke<AutostartStatus>("autostart_status");
+  } catch (e) {
+    autostartError = errText(e);
+  }
+}
+
+/** 每次进入常规页时重新读取，反映用户在 Windows 中的更改。 */
+export function loadAutostart(): Promise<void> | undefined {
+  if (autostartBusy) return autostartLoad;
+  autostartBusy = true;
+  autostartLoad = readAutostart().finally(() => {
+    autostartBusy = false;
+    autostartLoad = undefined;
+  });
+  return autostartLoad;
+}
+
+/** 用系统回读结果更新开关，保存失败时也重新读取状态。 */
+async function setAutostart(enabled: boolean) {
+  if (autostartBusy || autostart === null || autostart === "portable") return;
+  autostartBusy = true;
+  refresh();
+  try {
+    autostart = await invoke<AutostartStatus>("autostart_set", { enabled });
+  } catch (e) {
+    toast(errText(e), true);
+    await readAutostart();
+  } finally {
+    autostartBusy = false;
+    refresh();
+  }
+}
+
 async function checkUpdate() {
   S.update.checking = true;
   S.update.error = "";
@@ -153,6 +197,24 @@ export function renderGeneral(root: HTMLElement) {
       ...actions,
     );
 
+  const autostartLabel = t("general.autostart");
+  const autostartDesc = autostartError || t(
+    autostart === "portable" ? "general.autostartPortable" :
+    autostart === "blocked" ? "general.autostartBlocked" :
+    autostart === "stale" ? "general.autostartStale" : "general.autostartDesc",
+  );
+  const autostartSwitch = switchEl(
+    autostart === "enabled", setAutostart, autostartBusy || autostart === null || autostart === "portable",
+  );
+  const autostartInput = autostartSwitch.querySelector("input")!;
+  autostartInput.setAttribute("aria-label", autostartLabel);
+  autostartInput.setAttribute("role", "switch");
+  const autostartControl = autostart === "stale" || autostart === "blocked"
+    ? h("div", { class: "row" },
+        h("button", { class: "btn small", type: "button", disabled: autostartBusy, onclick: () => void setAutostart(false) }, t("general.autostartRemove")),
+        autostartSwitch)
+    : autostartSwitch;
+
   root.replaceChildren(
     pageHead(t("general.lead")),
     h(
@@ -184,6 +246,7 @@ export function renderGeneral(root: HTMLElement) {
         t("general.proxyDesc"),
         proxyField(c.proxy ?? "", null, (val) => saveConfig((x) => (x.proxy = val))),
       ),
+      row(autostartLabel, autostartDesc, autostartControl, true),
       row(
         t("general.useStore"),
         t("general.useStoreDesc"),

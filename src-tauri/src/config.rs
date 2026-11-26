@@ -232,6 +232,19 @@ const PORTABLE_MARKERS: [&str; 2] = ["portable", "portable.txt"];
 /// 便携模式下数据目录相对程序所在目录的名字
 const PORTABLE_DATA_DIR: &str = "data";
 
+/// 检查程序旁的便携标记，不依赖数据目录是否可写。
+pub fn has_portable_marker(exe_dir: &std::path::Path) -> std::io::Result<bool> {
+    for marker in PORTABLE_MARKERS {
+        match std::fs::metadata(exe_dir.join(marker)) {
+            Ok(metadata) if metadata.is_file() => return Ok(true),
+            Ok(_) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
 /// 便携模式的数据目录：程序同目录有标记文件时为 `<程序目录>\data`，否则 `None`
 ///
 /// 目录建不出来（如被放进了只读位置）也返回 `None`，回退到用户目录并打日志，免得程序直接用不了。
@@ -239,7 +252,7 @@ pub fn portable_dir() -> Option<PathBuf> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let exe_dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
-        if !PORTABLE_MARKERS.iter().any(|m| exe_dir.join(m).is_file()) {
+        if !has_portable_marker(&exe_dir).unwrap_or(false) {
             return None;
         }
         let dir = exe_dir.join(PORTABLE_DATA_DIR);

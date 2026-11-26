@@ -38,7 +38,7 @@ Press <kbd>Alt</kbd> + <kbd>T</kbd> and drag over any part of the screen. Transl
 For supported apps, Translate Anything replaces interface text with translations inside the app, without modifying any of the app's files. Press <kbd>Alt</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> to switch between original and translation at any time.
 
 - Supports some desktop apps built on **Electron, WebView2, or CEF**
-- Detects running apps and relaunches them in immersive mode with one click. You can configure automatic relaunch for each app you add
+- Detects running apps and relaunches them in immersive mode with one click. With automatic relaunch enabled, Translate Anything tries to switch the app to immersive mode just after it opens. If the app stays open, you can restart it manually
 - Identity check: only programs you added are taken over; if a different program shows up behind the port, takeover is refused
 - Input boxes, code blocks and similar areas are skipped automatically, and you can exclude more (e.g. chat messages) yourself
 
@@ -102,6 +102,7 @@ Requirements: Windows 10 / 11. The portable version requires the WebView2 runtim
 2. **Overlay translation**: press <kbd>Alt</kbd> + <kbd>T</kbd>, drag over an area, and the translation appears
 3. **Immersive mode**: on the Immersive mode page, click **Detect running apps**, pick the app to translate, then click **Launch in immersive mode**
 4. To switch engines or connect an LLM, go to the Engines page; changes take effect immediately
+5. In the installed version, turn on **Launch at startup** under **Settings → General** to start in the system tray when you sign in to Windows
 
 ## Privacy
 
@@ -114,7 +115,6 @@ Requirements: Windows 10 / 11. The portable version requires the WebView2 runtim
 
 - Translation filter: automatically skip code, paths, brand names and other text that shouldn't be translated
 - Visual translation: LLMs translating directly from the image
-- Improve seamless launch, start with Windows
 - Live speech interpretation, speech-to-subtitles
 - More interface languages
 - macOS / Linux versions

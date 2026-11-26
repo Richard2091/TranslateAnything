@@ -4984,6 +4984,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "windows",
+ "windows-registry",
  "xcap",
 ]
 

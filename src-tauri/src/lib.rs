@@ -2,6 +2,7 @@
 mod i18n;
 #[macro_use]
 mod timing;
+mod autostart;
 mod capture;
 mod dialog;
 mod commands;
@@ -121,6 +122,8 @@ pub fn run() {
             live::frame_set_click_through,
             settings::settings_get,
             settings::settings_save,
+            settings::autostart_status,
+            settings::autostart_set,
             settings::immersive_status,
             settings::immersive_set_enabled,
             settings::immersive_set_show,
