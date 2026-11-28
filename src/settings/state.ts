@@ -1,6 +1,6 @@
 // 设置窗口的数据：类型、全局状态、保存配置、翻译方式换算
 import { invoke } from "@tauri-apps/api/core";
-import { cleanupStalePopovers, clone, errText, toast } from "./ui";
+import { cleanupStalePopovers, clone, errText, keepSwitchMotion, toast } from "./ui";
 import { langLabel, t } from "../i18n";
 
 // ───────────────────────── 类型 ─────────────────────────
@@ -199,7 +199,9 @@ export function setRerender(fn: () => void) {
 /** 重绘界面，并尽量把焦点还给重绘前聚焦的那个控件（按 data-k 对应） */
 export function refresh() {
   const key = (document.activeElement as HTMLElement | null)?.dataset?.k;
+  const resumeSwitch = keepSwitchMotion();
   rerender();
+  resumeSwitch();
   cleanupStalePopovers();
   if (key) document.querySelector<HTMLElement>(`[data-k="${key}"]`)?.focus({ preventScroll: true });
 }

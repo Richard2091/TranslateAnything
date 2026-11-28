@@ -747,9 +747,10 @@ button.dropdown.open svg {
   border-radius: 7px;
   background: var(--panel);
   box-shadow: var(--shadow-sm), 0 0 0 1px var(--line);
+  /* 与侧栏选中条同一条弹性曲线和时长 */
   transition:
-    transform 0.32s var(--ease-spring),
-    width 0.32s var(--ease-spring);
+    transform 0.38s var(--ease-spring),
+    width 0.38s var(--ease-spring);
 }
 
 /* ───── 概览磁贴 ───── */
@@ -1933,13 +1934,25 @@ label.field > span {
   height: 0;
 }
 
+/* 开关：滑块弹性滑动、按下时拉长，底色渐变淡入淡出（渐变背景本身没法过渡，放在 ::before 上改透明度）。
+ * 拨动后整页重绘会换掉开关元素，新元素靠 .sw-on / .sw-off 接着把动画放完（见 ui.ts keepSwitchMotion） */
 .switch i {
   position: absolute;
   inset: 0;
   border-radius: 999px;
   background: var(--line-strong);
-  transition: background 0.2s;
   cursor: pointer;
+  transition: box-shadow 0.15s, opacity 0.2s;
+}
+
+.switch i::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--brand-grad);
+  opacity: 0;
+  transition: opacity var(--fade-time) ease;
 }
 
 .switch i::after {
@@ -1949,18 +1962,64 @@ label.field > span {
   left: 3px;
   width: 18px;
   height: 18px;
-  border-radius: 50%;
+  border-radius: 999px;
   background: #fff;
-  transition: transform 0.22s cubic-bezier(0.3, 1.4, 0.5, 1);
   box-shadow: 0 1px 3px rgb(0 0 0 / 22%);
+  transition:
+    transform var(--fold-time) var(--ease-spring),
+    width 0.18s var(--ease-out);
 }
 
-.switch input:checked + i {
-  background: var(--brand-grad);
+.switch input:checked + i::before {
+  opacity: 1;
 }
 
 .switch input:checked + i::after {
   transform: translateX(18px);
+}
+
+/* 按下时滑块拉长；打开状态向左拉长，保持贴着右侧 */
+.switch:active input:not(:disabled) + i::after {
+  width: 22px;
+}
+
+.switch:active input:checked:not(:disabled) + i::after {
+  transform: translateX(14px);
+}
+
+.switch.sw-on i::before,
+.switch.sw-off i::before {
+  animation: var(--fade-time) ease var(--sw-delay, 0s) both;
+}
+
+.switch.sw-on i::after,
+.switch.sw-off i::after {
+  animation: var(--fold-time) var(--ease-spring) var(--sw-delay, 0s) both;
+}
+
+.switch.sw-on i::before { animation-name: sw-fill-on; }
+.switch.sw-off i::before { animation-name: sw-fill-off; }
+.switch.sw-on i::after { animation-name: sw-knob-on; }
+.switch.sw-off i::after { animation-name: sw-knob-off; }
+
+@keyframes sw-fill-on {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sw-fill-off {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes sw-knob-on {
+  from { transform: none; }
+  to { transform: translateX(18px); }
+}
+
+@keyframes sw-knob-off {
+  from { transform: translateX(18px); }
+  to { transform: none; }
 }
 
 .switch input:focus-visible + i {

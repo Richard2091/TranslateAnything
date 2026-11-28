@@ -105,8 +105,45 @@ export function emptyState(text: string, ic: IconName = "box"): HTMLElement {
 
 export function switchEl(checked: boolean, onChange: (v: boolean) => void, disabled = false): HTMLLabelElement {
   const input = h("input", { type: "checkbox", checked, disabled });
-  input.addEventListener("change", () => onChange(input.checked));
-  return h("label", { class: "switch" }, input, h("i"));
+  const label = h("label", { class: "switch" }, input, h("i"));
+  input.addEventListener("change", () => {
+    lastSwitch = { el: label, checked: input.checked, at: performance.now() };
+    onChange(input.checked);
+  });
+  return label;
+}
+
+/** 最近一次拨动的开关；拨动后保存配置会重绘整页、换掉开关元素，靠它让新开关接着把动画放完 */
+let lastSwitch: { el: HTMLElement; checked: boolean; at: number } | null = null;
+const SWITCH_ANIM_MS = 420;
+
+/** 开关在重绘前后的对应关系：引擎行按行 id，其余按在当前页里的顺序 */
+function switchKey(el: HTMLElement): string {
+  const row = el.closest<HTMLElement>("[data-id]");
+  if (row) return `id:${row.dataset.id}`;
+  const scope = el.closest(".tab") ?? document;
+  return `n:${[...scope.querySelectorAll(".switch")].indexOf(el)}`;
+}
+
+/**
+ * 重绘前调用：记下刚拨动、动画还没放完的开关；返回的函数在重绘后调用，
+ * 让新开关从已经过去的时间点接着播放（负的 animation-delay）。
+ */
+export function keepSwitchMotion(): () => void {
+  const s = lastSwitch;
+  if (!s || !s.el.isConnected) return () => {};
+  const elapsed = performance.now() - s.at;
+  if (elapsed > SWITCH_ANIM_MS) return () => {};
+  const key = switchKey(s.el);
+  return () => {
+    const scope = document.querySelector(".tab.active") ?? document;
+    const next = [...scope.querySelectorAll<HTMLElement>(".switch")].find((el) => el !== s.el && switchKey(el) === key);
+    if (!next || next.querySelector("input")?.checked !== s.checked) return;
+    next.style.setProperty("--sw-delay", `${-elapsed}ms`);
+    next.classList.add(s.checked ? "sw-on" : "sw-off");
+    next.addEventListener("animationend", () => next.classList.remove("sw-on", "sw-off"), { once: true });
+    lastSwitch = { el: next, checked: s.checked, at: s.at };
+  };
 }
 
 export function field(label: string, control: HTMLElement, cls = ""): HTMLLabelElement {
@@ -120,6 +157,7 @@ export function segmented<T extends string>(
   onChange: (v: T) => void,
   disabled: T[] = [],
 ): HTMLElement {
+  let current = value;
   const box = h("div", { class: "segmented", role: "radiogroup" });
   const thumb = h("span", { class: "seg-thumb", "aria-hidden": "true" });
   box.append(thumb);
@@ -129,6 +167,7 @@ export function segmented<T extends string>(
     thumb.style.width = `${on.offsetWidth}px`;
     thumb.style.transform = `translateX(${on.offsetLeft}px)`;
   };
+  const segKey = options.map(([v]) => v).join("|");
   for (const [v, label] of options) {
     const b = h(
       "button",
@@ -139,8 +178,14 @@ export function segmented<T extends string>(
         "aria-checked": String(v === value),
         disabled: disabled.includes(v),
         onclick: () => {
-          if (v === value) return;
-          for (const x of box.querySelectorAll("button")) x.classList.toggle("on", x === b);
+          if (v === current) return;
+          current = v;
+          // 切换后保存配置多半会重绘整页，记下滑块原位置，让新组件从这里滑过去
+          lastSeg = { key: segKey, transform: thumb.style.transform, width: thumb.style.width, at: performance.now() };
+          for (const x of box.querySelectorAll("button")) {
+            x.classList.toggle("on", x === b);
+            x.setAttribute("aria-checked", String(x === b));
+          }
           place();
           onChange(v);
         },
@@ -149,14 +194,24 @@ export function segmented<T extends string>(
     );
     box.append(b);
   }
-  // 放进页面、排版完成后再定位滑块（首次不播放动画）
+  // 放进页面、排版完成后再定位滑块：首次直接就位；若是刚切换引起的重绘，从旧位置滑过去
   requestAnimationFrame(() => {
+    const from = lastSeg && lastSeg.key === segKey && performance.now() - lastSeg.at < 450 ? lastSeg : null;
     thumb.style.transition = "none";
-    place();
-    requestAnimationFrame(() => (thumb.style.transition = ""));
+    if (from) {
+      thumb.style.transform = from.transform;
+      thumb.style.width = from.width;
+      lastSeg = null;
+    } else place();
+    void thumb.offsetWidth;
+    thumb.style.transition = "";
+    if (from) place();
   });
   return box;
 }
+
+/** 最近一次分段选择器切换前的滑块位置（见 segmented） */
+let lastSeg: { key: string; transform: string; width: string; at: number } | null = null;
 
 export interface DropOption<T extends string> {
   value: T;
