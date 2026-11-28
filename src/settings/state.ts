@@ -6,13 +6,11 @@ import { langLabel, t } from "../i18n";
 // ───────────────────────── 类型 ─────────────────────────
 
 export interface FilterRuleSet {
-  keep_terms: string[];
   keep_patterns: string[];
   force_translate: string[];
 }
 
 export interface FilterConfig {
-  keep_terms: string[];
   keep_patterns: string[];
   force_translate: string[];
   apps: Record<string, FilterRuleSet>;
@@ -60,6 +58,8 @@ export interface Config {
   persist_cache: boolean;
   builtin_glossary: boolean;
   glossary: Record<string, string>;
+  /** 按软件的自定义术语：应用标识 → 术语表 */
+  glossary_apps?: Record<string, Record<string, string>>;
   filter: FilterConfig;
   immersive: { enabled: boolean; hotkey: string; targets: ImmersiveTarget[] };
   /** 界面语言；空或缺省表示跟随系统 */
@@ -117,6 +117,8 @@ export interface UpdateInfo {
   newer: boolean;
   url: string;
   published_at: string;
+  /** 更新说明（Release 正文，上中文下英文的 Markdown） */
+  notes: string;
   asset_name: string | null;
   asset_size: number;
   via: string;

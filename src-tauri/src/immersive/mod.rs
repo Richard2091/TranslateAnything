@@ -108,10 +108,10 @@ struct Runner {
 /// 沉浸模式运行状态（Tauri 托管）
 pub struct ImmersiveState {
     runners: Mutex<Vec<Runner>>,
-    /// 广播给所有已接管页面的 JS 表达式（术语表 / 译文库修改后推送）
-    patch: broadcast::Sender<String>,
-    /// 上次推送给页面的术语表，用来算差异
-    glossary: Mutex<HashMap<String, String>>,
+    /// 广播给已接管页面的 JS 表达式（术语表 / 译文库修改后推送）
+    patch: broadcast::Sender<Patch>,
+    /// 上次推送给各应用页面的术语表（应用标识 → 术语表），用来算差异
+    glossary: Mutex<HashMap<String, HashMap<String, String>>>,
     /// 上次发出的状态（去重）
     last: Mutex<String>,
 }
@@ -186,23 +186,46 @@ pub fn reload(app: &AppHandle) {
     notify(app);
 }
 
-/// 术语表有变化时，把差异推送到所有已接管的页面
-fn push_glossary(app: &AppHandle, cfg: &config::Config) {
-    let state = app.state::<ImmersiveState>();
-    let new = translate::glossary(cfg);
-    let mut last = state.glossary.lock().unwrap();
-    let set: HashMap<&String, &String> = new.iter().filter(|(k, v)| last.get(*k) != Some(*v)).collect();
-    let del: Vec<&String> = last.keys().filter(|k| !new.contains_key(*k)).collect();
-    if !set.is_empty() || !del.is_empty() {
-        broadcast_patch(app, json!({ "set": set, "del": del }));
-    }
-    *last = new;
+/// 推给页面的补丁
+#[derive(Debug, Clone)]
+pub struct Patch {
+    /// 只推给这个应用（规范化的应用标识）；空 = 所有应用
+    pub app: String,
+    pub expr: String,
 }
 
-/// 推送给页面：`set` 原文 → 新译文（立即替换已显示的），`del` 原文列表（忘掉旧译文、重新翻译）
+/// 术语表有变化时，把差异推送到对应应用已接管的页面（术语表可以按软件设置，所以逐个应用算）
+fn push_glossary(app: &AppHandle, cfg: &config::Config) {
+    let state = app.state::<ImmersiveState>();
+    let mut last = state.glossary.lock().unwrap();
+    let mut next = HashMap::new();
+    for t in &cfg.immersive.targets {
+        let id = session::target_app_id(t);
+        if next.contains_key(&id) {
+            continue;
+        }
+        let new = translate::glossary(cfg, &id);
+        if let Some(old) = last.get(&id) {
+            let set: HashMap<&String, &String> = new.iter().filter(|(k, v)| old.get(*k) != Some(*v)).collect();
+            let del: Vec<&String> = old.keys().filter(|k| !new.contains_key(*k)).collect();
+            if !set.is_empty() || !del.is_empty() {
+                send_patch(app, &id, json!({ "set": set, "del": del }));
+            }
+        }
+        next.insert(id, new);
+    }
+    *last = next;
+}
+
+/// 推送给所有应用的页面：`set` 原文 → 新译文（立即替换已显示的），`del` 原文列表（忘掉旧译文、重新翻译）
 pub fn broadcast_patch(app: &AppHandle, patch: serde_json::Value) {
+    send_patch(app, "", patch);
+}
+
+/// 推送给某个应用的页面（`app_id` 为空 = 所有应用）
+pub fn send_patch(app: &AppHandle, app_id: &str, patch: serde_json::Value) {
     let expr = format!("globalThis.__tf && __tf.patch({patch})");
-    let _ = app.state::<ImmersiveState>().patch.send(expr);
+    let _ = app.state::<ImmersiveState>().patch.send(Patch { app: config::normalize_app_id(app_id), expr });
 }
 
 /// 当前所有应用的状态

@@ -245,7 +245,7 @@ export function renderDashboard(root: HTMLElement) {
       { class: "tile-metrics" },
       h("div", {}, h("b", {}, st ? fmt(st.total) : "—"), h("span", {}, t("dash.entries"))),
       h("div", {}, h("b", {}, st ? fmt(st.hits) : "—"), h("span", {}, t("dash.hits"))),
-      h("div", {}, h("b", {}, String(Object.keys(c.glossary).length)), h("span", {}, t("dash.terms"))),
+      h("div", {}, h("b", {}, String(Object.values(c.glossary_apps ?? {}).reduce((n, m) => n + Object.keys(m).length, Object.keys(c.glossary).length))), h("span", {}, t("dash.terms"))),
     ),
     h("div", { class: "tile-line" }, c.persist_cache ? t("dash.storeOn") : t("dash.storeOff")),
   );

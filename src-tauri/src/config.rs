@@ -47,9 +47,12 @@ pub struct Config {
     pub store_dir: String,
     /// 使用内置的界面常用词术语表（如 New → 新建），避免引擎翻单个词时没有上下文而翻错
     pub builtin_glossary: bool,
-    /// 自定义术语表：原文 → 译文，整条精确匹配，优先于内置术语表、译文库和引擎。
-    /// 译文写成与原文相同即"保持原样不翻"
+    /// 自定义术语表（全局）：原文 → 译文，译文与原文相同 = 保留原文不翻。
+    /// 整条命中时直接采用（优先于过滤、译文库和引擎）；句中出现时提示给 AI 翻译
     pub glossary: BTreeMap<String, String>,
+    /// 按软件的自定义术语，键为应用标识（程序文件名小写，见 `normalize_app_id`），覆盖同名的全局术语
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub glossary_apps: BTreeMap<String, BTreeMap<String, String>>,
     /// 翻译过滤规则（全局 + 按应用）
     pub filter: FilterConfig,
     /// 沉浸模式：直接改写目标应用界面里的文字（目前支持 Electron/Chromium 内核应用）
@@ -111,20 +114,25 @@ pub struct ProviderConfig {
     pub icon: String,
 }
 
-/// 翻译过滤规则集（不翻译词表 / 正则 / 强制翻译）
+/// 翻译过滤规则集（不翻译正则 / 强制翻译）。要保留原文的词写在术语表里
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FilterRuleSet {
-    pub keep_terms: Vec<String>,
+    /// 旧版"不翻译词表"，读取时迁入术语表（见 `Config::migrate`），不再写回
+    #[serde(rename = "keep_terms", skip_serializing)]
+    pub legacy_keep_terms: Vec<String>,
     pub keep_patterns: Vec<String>,
     pub force_translate: Vec<String>,
 }
 
 impl FilterRuleSet {
     fn extend_from(&mut self, other: &FilterRuleSet) {
-        self.keep_terms.extend(other.keep_terms.iter().cloned());
         self.keep_patterns.extend(other.keep_patterns.iter().cloned());
         self.force_translate.extend(other.force_translate.iter().cloned());
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.legacy_keep_terms.is_empty() && self.keep_patterns.is_empty() && self.force_translate.is_empty()
     }
 }
 
@@ -132,7 +140,9 @@ impl FilterRuleSet {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FilterConfig {
-    pub keep_terms: Vec<String>,
+    /// 旧版"不翻译词表"，同 `FilterRuleSet::legacy_keep_terms`
+    #[serde(rename = "keep_terms", skip_serializing)]
+    pub legacy_keep_terms: Vec<String>,
     pub keep_patterns: Vec<String>,
     pub force_translate: Vec<String>,
     pub apps: BTreeMap<String, FilterRuleSet>,
@@ -246,6 +256,7 @@ impl Default for Config {
             store_dir: String::new(),
             builtin_glossary: true,
             glossary: BTreeMap::new(),
+            glossary_apps: BTreeMap::new(),
             filter: FilterConfig::default(),
             immersive: ImmersiveConfig::default(),
             update: UpdateConfig::default(),
@@ -296,7 +307,7 @@ impl Config {
     /// 合并全局与指定应用生效的过滤规则
     pub fn effective_filter(&self, app_id: Option<&str>) -> FilterRuleSet {
         let mut out = FilterRuleSet {
-            keep_terms: self.filter.keep_terms.clone(),
+            legacy_keep_terms: Vec::new(),
             keep_patterns: self.filter.keep_patterns.clone(),
             force_translate: self.filter.force_translate.clone(),
         };
@@ -316,6 +327,53 @@ impl Config {
             }
         }
         out
+    }
+
+    /// 某个应用生效的自定义术语：全局 + 该应用的（后者覆盖前者），键已去掉首尾空白
+    pub fn user_glossary(&self, app_id: &str) -> BTreeMap<String, String> {
+        let norm = normalize_app_id(app_id);
+        let mut out = BTreeMap::new();
+        let apps = self.glossary_apps.iter().filter(|(k, _)| !norm.is_empty() && normalize_app_id(k) == norm);
+        for (k, v) in std::iter::once(&self.glossary).chain(apps.map(|(_, m)| m)).flatten() {
+            let k = k.trim();
+            if !k.is_empty() && !v.trim().is_empty() {
+                out.insert(k.to_string(), v.trim().to_string());
+            }
+        }
+        out
+    }
+
+    /// 旧版"不翻译词表"（过滤规则里的 `keep_terms`，全局 / 按应用 / 沉浸模式应用各一份）
+    /// 迁入术语表，写成"原文 → 原文"。原来它比术语表先生效，所以同名术语改为保留原文。
+    /// 返回是否有改动
+    pub fn migrate(&mut self) -> bool {
+        let mut changed = false;
+        for term in std::mem::take(&mut self.filter.legacy_keep_terms) {
+            let term = term.trim().to_string();
+            if !term.is_empty() {
+                self.glossary.insert(term.clone(), term);
+            }
+            changed = true;
+        }
+        let mut moved: Vec<(String, Vec<String>)> = Vec::new();
+        for (app, rules) in &mut self.filter.apps {
+            moved.push((normalize_app_id(app), std::mem::take(&mut rules.legacy_keep_terms)));
+        }
+        for t in &mut self.immersive.targets {
+            let raw = if t.exe.trim().is_empty() { &t.name } else { &t.exe };
+            moved.push((normalize_app_id(raw), std::mem::take(&mut t.filter.legacy_keep_terms)));
+        }
+        for (app, terms) in moved.into_iter().filter(|(_, terms)| !terms.is_empty()) {
+            changed = true;
+            let map = if app.is_empty() { &mut self.glossary } else { self.glossary_apps.entry(app).or_default() };
+            for term in terms.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+                map.insert(term.to_string(), term.to_string());
+            }
+        }
+        if changed {
+            self.filter.apps.retain(|_, r| !r.is_empty());
+        }
+        changed
     }
 }
 
@@ -423,7 +481,11 @@ pub fn load() -> Result<Config, String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
         Err(e) => return Err(t!("err.config.read", path = path.display(), e = e)),
     };
-    serde_json::from_str(&text).map_err(|e| t!("err.config.parse", path = path.display(), e = e))
+    let mut cfg: Config = serde_json::from_str(&text).map_err(|e| t!("err.config.parse", path = path.display(), e = e))?;
+    if cfg.migrate() {
+        let _ = save(&cfg);
+    }
+    Ok(cfg)
 }
 
 /// 检查配置是否可以保存（端口重复等）
@@ -582,7 +644,6 @@ mod tests {
         assert!(validate(&cfg).is_ok());
         assert_eq!(normalize_app_id(r"C:\Program Files\Code.exe"), "code.exe");
         let rules = cfg.effective_filter(Some("CODE.EXE"));
-        assert_eq!(rules.keep_terms, ["Claude", "Terminal"]);
         assert_eq!(rules.keep_patterns, ["^v\\d+$", "^--"]);
         assert_eq!(rules.force_translate, ["Step 1", "Run"]);
         assert_eq!(cfg.provider("openai").effective_concurrency("openai"), 3);
@@ -593,5 +654,45 @@ mod tests {
         let mut bad = cfg.clone();
         bad.filter.keep_patterns.push("[unclosed".into());
         assert!(validate(&bad).is_err());
+    }
+
+    #[test]
+    fn 旧版不翻译词表迁入术语表() {
+        let mut cfg: Config = serde_json::from_str(
+            r#"{
+                "glossary": { "Claude": "克劳德", "New": "新建" },
+                "filter": {
+                    "keep_terms": ["Claude", " "],
+                    "apps": {
+                        "Code.exe": { "keep_terms": ["Terminal"] },
+                        "word.exe": { "keep_terms": ["Ribbon"], "keep_patterns": ["^--"] }
+                    }
+                },
+                "immersive": {
+                    "targets": [
+                        { "name": "Claude", "exe": "C:\\x\\claude.exe", "port": 39222, "filter": { "keep_terms": ["Opus"], "force_translate": ["Run"] } }
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(cfg.migrate());
+        assert_eq!(cfg.glossary["Claude"], "Claude", "原来不翻译词表先生效，同名术语改为保留原文");
+        assert_eq!(cfg.glossary["New"], "新建");
+        assert!(!cfg.glossary.contains_key(""));
+        assert_eq!(cfg.glossary_apps["code.exe"]["Terminal"], "Terminal");
+        assert_eq!(cfg.glossary_apps["claude.exe"]["Opus"], "Opus");
+        assert!(!cfg.filter.apps.contains_key("Code.exe"), "迁完变空的应用规则删掉");
+        assert_eq!(cfg.filter.apps["word.exe"].keep_patterns, ["^--"]);
+        assert_eq!(cfg.immersive.targets[0].filter.force_translate, ["Run"]);
+        assert!(!cfg.migrate(), "迁移只做一次");
+
+        let saved = serde_json::to_string(&cfg).unwrap();
+        assert!(!saved.contains("keep_terms"), "旧字段不再写回");
+
+        let g = cfg.user_glossary("C:\\Program Files\\Code.exe");
+        assert_eq!(g["Terminal"], "Terminal");
+        assert_eq!(g["New"], "新建");
+        assert!(!cfg.user_glossary("other.exe").contains_key("Terminal"), "按软件的术语只对该软件生效");
     }
 }

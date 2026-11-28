@@ -19,7 +19,7 @@ use crate::filter::{self, Decision, FilterContext, Mode as FilterMode, Reason};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -98,7 +98,7 @@ pub trait Translator: Send + Sync {
         &self,
         items: &[TranslateItem],
         _ctx: &BatchContext,
-        _keep_terms: &[String],
+        _terms: &Terms,
         target_lang: &str,
     ) -> Result<Vec<TranslatedItem>, TranslateError> {
         let texts: Vec<String> = items.iter().map(|it| it.text.clone()).collect();
@@ -301,20 +301,58 @@ pub fn cache_engine() -> String {
     t!("engine.cache")
 }
 
-/// 术语表：内置界面常用词（`glossary.json`，按目标语言）+ 配置里的 `glossary`（后者优先）。
-/// 按整条原文精确匹配（忽略首尾空白），命中的不查库也不请求引擎。
+/// 某个应用的完整术语表：内置界面常用词（`glossary.json`，按目标语言）< 全局自定义 < 该应用的自定义。
+/// 沉浸模式预加载到页面用；翻译链路里自定义术语与内置术语分两步查（见 `translate_items_with_fallback`）。
 /// 传统翻译引擎翻单个界面词没有上下文，容易出"New → 新款""Auto → 汽车"这类错，靠它兜住。
-pub fn glossary(cfg: &Config) -> HashMap<String, String> {
+pub fn glossary(cfg: &Config, app_id: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
     if cfg.builtin_glossary {
         map.extend(builtin_glossary(&cfg.target_lang));
     }
-    map.extend(cfg.glossary.iter().map(|(k, v)| (k.trim().to_string(), v.clone())));
+    map.extend(cfg.user_glossary(app_id));
     map
 }
 
+/// 整条匹配自定义术语（规则同强制翻译：忽略首尾空白，纯 ASCII 忽略大小写），返回（术语原文，译文）
+fn lookup_term<'a>(terms: &'a BTreeMap<String, String>, text: &str) -> Option<(&'a String, &'a String)> {
+    let core = text.trim();
+    terms.get_key_value(core).or_else(|| terms.iter().find(|(k, _)| filter::term_eq(k, core)))
+}
+
+/// 送给 AI 翻译的术语提示：只带本批文字里出现过的自定义术语，免得浪费 token
+#[derive(Debug, Clone, Default)]
+pub struct Terms {
+    /// 必须原样保留的词（术语表里译文与原文相同的条目）
+    pub keep: Vec<String>,
+    /// 指定译法：原文 → 译文
+    pub glossary: Vec<(String, String)>,
+}
+
+impl Terms {
+    const MAX: usize = 30;
+
+    fn for_items(terms: &BTreeMap<String, String>, items: &[TranslateItem]) -> Self {
+        let texts: Vec<String> = items.iter().map(|it| it.text.to_lowercase()).collect();
+        let mut out = Self::default();
+        for (k, v) in terms {
+            let needle = k.to_lowercase();
+            if !texts.iter().any(|t| t.contains(&needle)) {
+                continue;
+            }
+            if v.trim() == k.trim() {
+                if out.keep.len() < Self::MAX {
+                    out.keep.push(k.clone());
+                }
+            } else if out.glossary.len() < Self::MAX {
+                out.glossary.push((k.clone(), v.clone()));
+            }
+        }
+        out
+    }
+}
+
 /// 某个目标语言的内置术语表（设置界面展示用）
-pub fn builtin_glossary(target_lang: &str) -> std::collections::BTreeMap<String, String> {
+pub fn builtin_glossary(target_lang: &str) -> BTreeMap<String, String> {
     static BUILTIN: OnceLock<HashMap<String, std::collections::BTreeMap<String, String>>> = OnceLock::new();
     let builtin = BUILTIN.get_or_init(|| serde_json::from_str(include_str!("glossary.json")).unwrap_or_default());
     let key = match primary(target_lang).as_str() {
@@ -420,31 +458,46 @@ pub async fn translate_items_with_fallback(
     let mut out: Vec<Option<TranslatedItem>> = vec![None; items.len()];
     let mut forced = vec![false; items.len()];
     let mut filter_kept = 0usize;
+    let mut glossary_hits = 0usize;
+    let user_terms = cfg.user_glossary(&app_id);
 
-    // 1. 统一本地过滤
+    // 1. 自定义术语（整条命中，用户明确指定，优先于过滤）→ 统一本地过滤
+    //    强制翻译的词若在术语表里写成保留原文，以强制翻译为准
     for (i, it) in items.iter().enumerate() {
-        match filter::classify(cfg, &it.text, &fctx) {
+        let decision = filter::classify(cfg, &it.text, &fctx);
+        forced[i] = decision == Decision::ForceTranslate;
+        if let Some((k, g)) = lookup_term(&user_terms, &it.text) {
+            let keep = g.trim() == k.trim();
+            if !(keep && forced[i]) {
+                if keep {
+                    filter::record_event(&it.text, "keep", Reason::UserKeepTerm, &fctx);
+                }
+                out[i] = Some(TranslatedItem {
+                    text: if keep { it.text.clone() } else { g.clone() },
+                    keep,
+                });
+                glossary_hits += 1;
+                continue;
+            }
+        }
+        match decision {
             Decision::Keep(reason) => {
                 filter::record_event(&it.text, "keep", reason, &fctx);
                 out[i] = Some(TranslatedItem { text: it.text.clone(), keep: true });
                 filter_kept += 1;
             }
-            Decision::ForceTranslate => {
-                filter::record_event(&it.text, "translate", Reason::ForceTranslate, &fctx);
-                forced[i] = true;
-            }
+            Decision::ForceTranslate => filter::record_event(&it.text, "translate", Reason::ForceTranslate, &fctx),
             Decision::Translate => {}
         }
     }
 
-    // 2. 术语表（整条精确匹配；用户强制翻译且术语原样保留时不拦截）
-    let terms = glossary(cfg);
-    let mut glossary_hits = 0usize;
+    // 2. 内置术语表（整条精确匹配；用户强制翻译且术语原样保留时不拦截）
+    let builtin = if cfg.builtin_glossary { builtin_glossary(lang) } else { BTreeMap::new() };
     for (i, it) in items.iter().enumerate() {
         if out[i].is_some() {
             continue;
         }
-        if let Some(g) = terms.get(it.text.trim()) {
+        if let Some(g) = builtin.get(it.text.trim()) {
             let keep = g.trim() == it.text.trim();
             if forced[i] && keep {
                 continue;
@@ -536,21 +589,8 @@ pub async fn translate_items_with_fallback(
         let mut used_name = cache_engine();
         if !engine_items.is_empty() {
             let t = Instant::now();
-            let rule_set = filter::active_keep_terms(cfg, &app_id);
-            let keep_terms: Vec<String> = rule_set
-                .keep_terms
-                .into_iter()
-                .filter(|term| {
-                    let t_trim = term.trim();
-                    !t_trim.is_empty()
-                        && engine_items
-                            .iter()
-                            .any(|it| it.text.to_lowercase().contains(&t_trim.to_lowercase()))
-                })
-                .take(30)
-                .collect();
-
-            let result = translate_items_by_engines(cfg, &engine_items, ctx, &keep_terms).await;
+            let terms = Terms::for_items(&user_terms, &engine_items);
+            let result = translate_items_by_engines(cfg, &engine_items, ctx, &terms).await;
             let api_time = t.elapsed();
             let (translated, id, display_name, is_ai) = match result {
                 Ok(v) => v,
@@ -695,7 +735,7 @@ async fn translate_items_by_engines(
     cfg: &Config,
     items: &[TranslateItem],
     ctx: &BatchContext,
-    keep_terms: &[String],
+    terms: &Terms,
 ) -> Result<(Vec<TranslatedItem>, String, String, bool), String> {
     let chain = cfg.engine_chain();
     let active: Vec<(String, ProviderConfig)> = chain.iter().filter(|(id, _)| !is_cooling(id)).cloned().collect();
@@ -713,9 +753,9 @@ async fn translate_items_by_engines(
             Ok(t) => {
                 let r = if ai {
                     // AI 引擎内部每次 chat() 已走 limiter::run_limited
-                    t.translate_items(items, ctx, keep_terms, &cfg.target_lang).await
+                    t.translate_items(items, ctx, terms, &cfg.target_lang).await
                 } else {
-                    limiter::run_limited(&id, conc, || t.translate_items(items, ctx, keep_terms, &cfg.target_lang)).await
+                    limiter::run_limited(&id, conc, || t.translate_items(items, ctx, terms, &cfg.target_lang)).await
                 };
                 (Some(t), r)
             }
@@ -1110,16 +1150,55 @@ mod tests {
     #[test]
     fn 术语表() {
         let mut cfg = Config::default();
-        let g = glossary(&cfg);
+        cfg.target_lang = "zh-CN".into();
+        let g = glossary(&cfg, "");
         assert_eq!(g["New"], "新建");
         cfg.glossary.insert(" New ".into(), "新的".into());
-        assert_eq!(glossary(&cfg)["New"], "新的", "用户术语优先");
+        assert_eq!(glossary(&cfg, "")["New"], "新的", "用户术语优先");
+        cfg.glossary_apps.entry("code.exe".into()).or_default().insert("New".into(), "新文件".into());
+        assert_eq!(glossary(&cfg, r"C:\x\Code.exe")["New"], "新文件", "软件术语覆盖全局");
+        assert_eq!(glossary(&cfg, "other.exe")["New"], "新的");
         cfg.builtin_glossary = false;
         cfg.glossary.clear();
-        assert!(glossary(&cfg).is_empty());
+        cfg.glossary_apps.clear();
+        assert!(glossary(&cfg, "").is_empty());
         cfg.builtin_glossary = true;
         cfg.target_lang = "ja".into();
-        assert!(!glossary(&cfg).contains_key("New"), "其他目标语言不用中文术语");
+        assert!(!glossary(&cfg, "").contains_key("New"), "其他目标语言不用中文术语");
+    }
+
+    #[test]
+    fn 术语匹配与送给_ai_的提示() {
+        let terms: BTreeMap<String, String> =
+            [("Claude", "Claude"), ("Artifacts", "工件"), ("新建", "新建"), ("Unused", "无关")]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+        assert_eq!(lookup_term(&terms, " claude ").map(|(k, _)| k.as_str()), Some("Claude"), "ASCII 忽略大小写");
+        assert!(lookup_term(&terms, "Claude Code").is_none(), "整条匹配，不做包含");
+        let item = |t: &str| TranslateItem { text: t.into(), role: None, group: None };
+        let hint = Terms::for_items(&terms, &[item("Ask CLAUDE about artifacts")]);
+        assert_eq!(hint.keep, ["Claude"]);
+        assert_eq!(hint.glossary, [("Artifacts".to_string(), "工件".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn 自定义术语先于过滤生效() {
+        let mut cfg = Config::default();
+        cfg.target_lang = "zh-CN".into();
+        cfg.persist_cache = false;
+        cfg.glossary.insert("README.md".into(), "自述文件".into());
+        cfg.glossary.insert("Claude".into(), "Claude".into());
+        cfg.glossary_apps.entry("code.exe".into()).or_default().insert("Run".into(), "运行".into());
+        let ctx = BatchContext { mode: SourceMode::Dom, app_id: "Code.exe".into(), app_name: String::new(), title: String::new() };
+        let items: Vec<TranslateItem> = ["README.md", "run", "New"]
+            .into_iter()
+            .map(|t| TranslateItem { text: t.into(), role: None, group: None })
+            .collect();
+        let (out, _) = translate_items_with_fallback(&cfg, &items, &ctx, "测试").await.unwrap();
+        assert_eq!(out[0].text, "自述文件", "用户指定的译法不被文件名规则拦下");
+        assert_eq!(out[1].text, "运行", "按软件的术语");
+        assert_eq!(out[2].text, "新建", "内置术语照常生效");
     }
 
     #[test]

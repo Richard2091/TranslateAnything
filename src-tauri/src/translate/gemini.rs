@@ -2,7 +2,7 @@
 
 use super::limiter;
 use super::llm::{self, LlmChat};
-use super::{BatchContext, TranslateError, TranslateItem, TranslatedItem, Translator, build_client, parse_err, require_key, send_json};
+use super::{BatchContext, Terms, TranslateError, TranslateItem, TranslatedItem, Translator, build_client, parse_err, require_key, send_json};
 use crate::config::ProviderConfig;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -134,10 +134,10 @@ impl Translator for Gemini {
         &self,
         items: &[TranslateItem],
         ctx: &BatchContext,
-        keep_terms: &[String],
+        terms: &Terms,
         target_lang: &str,
     ) -> Result<Vec<TranslatedItem>, TranslateError> {
-        llm::translate_items(self, items, ctx, keep_terms, target_lang).await
+        llm::translate_items(self, items, ctx, terms, target_lang).await
     }
 }
 

@@ -1,6 +1,7 @@
 // 常规：界面语言、目标语言、网络代理、译文库开关、文件位置（显示大小，译文库可搬家）、版本与更新
 import { invoke } from "@tauri-apps/api/core";
-import { S, cfg, langs, loadStats, loadView, refresh, saveConfig, type UpdateInfo } from "../state";
+import { S, cfg, langs, loadStats, loadView, refresh, saveConfig } from "../state";
+import { checkUpdate, openUpdateDialog } from "../update";
 import { combo, confirmDialog, dropdown, errText, fileSize, h, icon, pageHead, section, switchEl, toast, type IconName } from "../ui";
 import { t, uiLocales } from "../../i18n";
 import { proxyField } from "./engineShared";
@@ -51,37 +52,6 @@ async function setAutostart(enabled: boolean) {
   }
 }
 
-async function checkUpdate() {
-  S.update.checking = true;
-  S.update.error = "";
-  refresh();
-  try {
-    S.update.info = await invoke<UpdateInfo>("update_check");
-    if (!S.update.info.newer) toast(t("general.update.latestAlready"));
-  } catch (e) {
-    S.update.error = errText(e);
-  } finally {
-    S.update.checking = false;
-    refresh();
-  }
-}
-
-async function installUpdate() {
-  S.update.installing = true;
-  S.update.progress = 0;
-  S.update.error = "";
-  refresh();
-  try {
-    // 安装版：下载完成后启动安装程序，本程序随即退出；便携版：打开下载页
-    await invoke("update_install");
-  } catch (e) {
-    S.update.error = errText(e);
-  } finally {
-    S.update.installing = false;
-    refresh();
-  }
-}
-
 /** 选了“自定义镜像”但还没填地址时，保持显示输入框 */
 let customChannel = false;
 
@@ -125,7 +95,6 @@ function updateCard(row: (label: string, desc: string, control: HTMLElement, aut
   const v = S.version;
   const u = S.update;
   const info = u.info;
-  const skipped = !!info && info.latest === c.update?.skip_version;
   const versionText = v ? `v${v.version} · ${v.arch}${v.portable ? ` · ${t("general.update.portable")}` : ""}` : "";
 
   let status: HTMLElement;
@@ -140,18 +109,9 @@ function updateCard(row: (label: string, desc: string, control: HTMLElement, aut
   }
 
   const actions: HTMLElement[] = [];
-  if (info?.newer && !u.installing) {
-    // 没有匹配本机的安装包时只能打开下载页；安装版和便携版都能就地更新
-    const pageOnly = !info.asset_name;
-    actions.push(
-      h("button", { class: "btn sm primary", onclick: installUpdate }, pageOnly ? t("general.update.openPage") : t("general.update.install")),
-      skipped
-        ? h("span")
-        : h("button", {
-            class: "btn ghost sm",
-            onclick: () => saveConfig((x) => (x.update = { ...x.update, skip_version: info.latest }), t("general.update.skipped")),
-          }, t("general.update.skip")),
-    );
+  if (info?.newer) {
+    // 查看说明、下载、跳过都在新版本对话框里
+    actions.push(h("button", { class: "btn sm primary", onclick: openUpdateDialog }, u.installing ? t("general.update.progress") : t("general.update.details")));
   }
   actions.push(
     h("button", { class: "btn sm", disabled: u.checking || u.installing, onclick: checkUpdate },

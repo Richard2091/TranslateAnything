@@ -118,7 +118,8 @@ fn on_menu(app: &AppHandle, event: tauri::menu::MenuEvent) {
             let _ = settings::open_settings(app);
         }
         "update" => {
-            let _ = settings::open_settings_at(app, "general");
+            // 打开设置窗口并弹出更新对话框
+            let _ = settings::open_settings_at(app, "update");
         }
         "quit" => {
             let app = app.clone();

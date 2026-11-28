@@ -11,11 +11,15 @@
   "persist_cache": true,
   "builtin_glossary": true,
   "glossary": {
+    "Claude": "Claude",
+    "GitHub": "GitHub",
     "Opus": "Opus",
     "Artifacts": "工件"
   },
+  "glossary_apps": {
+    "code.exe": { "Terminal": "终端" }
+  },
   "filter": {
-    "keep_terms": ["Claude", "GitHub"],
     "keep_patterns": ["^v\\d+(\\.\\d+)*$"],
     "force_translate": [],
     "apps": {}

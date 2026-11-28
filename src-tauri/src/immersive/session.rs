@@ -66,7 +66,7 @@ pub fn wanted(t: &TargetInfo, target: &ImmersiveTarget) -> bool {
 }
 
 /// 组装注入脚本：把配置和预加载译文（译文库最近常用 + 术语表）填进占位符
-fn target_app_id(target: &ImmersiveTarget) -> String {
+pub(super) fn target_app_id(target: &ImmersiveTarget) -> String {
     let raw = if !target.exe.trim().is_empty() {
         target.exe.as_str()
     } else {
@@ -83,7 +83,7 @@ fn build_script(cfg: &Config, target: &ImmersiveTarget, show: bool) -> String {
     } else {
         HashMap::new()
     };
-    preload.extend(translate::glossary(cfg));
+    preload.extend(translate::glossary(cfg, &app_id));
     let cfg = json!({
         "enabled": show,
         "skipCjk": target_lang.to_ascii_lowercase().starts_with("zh"),
@@ -108,7 +108,7 @@ pub struct Ctx {
     pub target: ImmersiveTarget,
     pub show: watch::Receiver<bool>,
     pub stop: watch::Receiver<bool>,
-    pub patch: broadcast::Receiver<String>,
+    pub patch: broadcast::Receiver<super::Patch>,
     pub status: SharedStatus,
 }
 
@@ -210,11 +210,12 @@ async fn run_inner(t: &TargetInfo, mut ctx: Ctx) -> Result<(), String> {
             }
             msg = ctx.patch.recv() => {
                 match msg {
-                    Ok(expr) => {
+                    Ok(p) if p.app.is_empty() || p.app == target_app_id(&ctx.target) => {
                         for &c in &contexts {
-                            let _ = eval(&cdp, c, &expr).await;
+                            let _ = eval(&cdp, c, &p.expr).await;
                         }
                     }
+                    Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => break,
                 }

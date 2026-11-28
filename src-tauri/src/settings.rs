@@ -269,10 +269,7 @@ pub fn filter_events(
 }
 
 fn remove_term(list: &mut Vec<String>, term: &str) {
-    list.retain(|x| {
-        let xt = x.trim();
-        !(xt == term || (xt.is_ascii() && term.is_ascii() && xt.eq_ignore_ascii_case(term)))
-    });
+    list.retain(|x| !filter::term_eq(x, term));
 }
 
 fn add_term(list: &mut Vec<String>, term: &str) {
@@ -295,34 +292,31 @@ pub fn filter_override(
     }
     let mut cfg = config::load()?;
     let norm = app_id.as_deref().map(config::normalize_app_id).unwrap_or_default();
-    let rules = if norm.is_empty() {
-        None
-    } else {
-        Some(cfg.filter.apps.entry(norm.clone()).or_default())
-    };
+    // "改为不翻"写进术语表（原文 → 原文），"改为翻译"写进过滤规则的强制翻译；有应用时只对该应用生效
+    let terms = if norm.is_empty() { &mut cfg.glossary } else { cfg.glossary_apps.entry(norm.clone()).or_default() };
     match action.as_str() {
         "translate" => {
-            if let Some(r) = rules {
-                remove_term(&mut r.keep_terms, term);
-                add_term(&mut r.force_translate, term);
-            } else {
-                remove_term(&mut cfg.filter.keep_terms, term);
+            terms.retain(|k, v| !(filter::term_eq(k, term) && v.trim() == k.trim()));
+            if norm.is_empty() {
                 add_term(&mut cfg.filter.force_translate, term);
+            } else {
+                add_term(&mut cfg.filter.apps.entry(norm.clone()).or_default().force_translate, term);
             }
+            cfg.glossary_apps.retain(|_, m| !m.is_empty());
             config::save(&cfg)?;
             let _ = store::delete_by_source(&cfg.target_lang, &[term.to_string()]);
             immersive::broadcast_patch(&app, json!({ "del": [term], "resetFilter": true }));
         }
         "keep" => {
-            if let Some(r) = rules {
-                remove_term(&mut r.force_translate, term);
-                add_term(&mut r.keep_terms, term);
-            } else {
+            terms.insert(term.to_string(), term.to_string());
+            if norm.is_empty() {
                 remove_term(&mut cfg.filter.force_translate, term);
-                add_term(&mut cfg.filter.keep_terms, term);
+            } else if let Some(r) = cfg.filter.apps.get_mut(&norm) {
+                remove_term(&mut r.force_translate, term);
             }
+            cfg.filter.apps.retain(|_, r| !r.is_empty());
             config::save(&cfg)?;
-            immersive::broadcast_patch(&app, json!({ "keep": [term], "resetFilter": true }));
+            immersive::send_patch(&app, &norm, json!({ "keep": [term], "resetFilter": true }));
         }
         _ => return Err("未知的过滤操作".into()),
     }

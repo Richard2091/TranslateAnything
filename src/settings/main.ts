@@ -11,10 +11,11 @@ import { renderImmersive } from "./pages/immersive";
 import { renderMt } from "./pages/mt";
 import { renderAi } from "./pages/ai";
 import { buildLibrary, queryLibrary } from "./pages/library";
-import { glossaryDirty, renderGlossary, resetGlossaryDraft } from "./pages/glossary";
+import { glossaryDirty, loadGlossaryPage, renderGlossary, resetGlossaryDraft } from "./pages/glossary";
 import { filterDirty, loadFilterPage, renderFilter, resetFilterDraft } from "./pages/filter";
 import { loadAutostart, renderGeneral } from "./pages/general";
 import { initI18n, isZh, t } from "../i18n";
+import { autoOpenUpdateDialog, onUpdateProgress, openUpdateDialog } from "./update";
 
 type Page = { render: (root: HTMLElement) => void; onShow?: () => Promise<unknown> | void };
 
@@ -25,7 +26,7 @@ const PAGES: Record<string, Page> = {
   mt: { render: renderMt, onShow: () => loadCooldowns() },
   ai: { render: renderAi, onShow: () => loadCooldowns() },
   library: { render: buildLibrary, onShow: queryLibrary },
-  glossary: { render: renderGlossary },
+  glossary: { render: renderGlossary, onShow: loadGlossaryPage },
   filter: { render: renderFilter, onShow: loadFilterPage },
   general: { render: renderGeneral },
 };
@@ -106,6 +107,13 @@ async function switchTab(name: string) {
 }
 setNav((tab) => void switchTab(tab));
 
+/** 后端要求跳转：页面名，或 `update`（到常规页并打开新版本对话框） */
+function goto(target: string) {
+  const tab = target === "update" ? "general" : target;
+  if (PAGES[tab] && current !== tab) void switchTab(tab);
+  if (target === "update") openUpdateDialog();
+}
+
 for (const b of document.querySelectorAll<HTMLButtonElement>("#nav button")) {
   b.addEventListener("click", () => {
     if (!b.classList.contains("active")) switchTab(b.dataset.tab!);
@@ -172,9 +180,11 @@ setInterval(async () => {
       invoke<UpdateInfo | null>("update_state"),
       loadCooldowns(),
     ]);
-    // 从托盘"发现新版本"打开时直接到常规页
-    const goto = await invoke<string | null>("settings_take_goto").catch(() => null);
-    await switchTab(goto && PAGES[goto] ? goto : "dashboard");
+    // 从托盘"发现新版本"打开时到常规页并弹出更新对话框
+    const target = await invoke<string | null>("settings_take_goto").catch(() => null);
+    if (target) goto(target);
+    else await switchTab("dashboard");
+    autoOpenUpdateDialog();
   } catch (e) {
     rootOf("dashboard").replaceChildren(h("div", { class: "note bad" }, t("settings.loadFailed", { error: errText(e) })));
     rootOf("dashboard").classList.add("active");
@@ -190,14 +200,15 @@ setInterval(async () => {
   });
   await listen<string>("settings-goto", (e) => {
     void invoke("settings_take_goto");
-    if (PAGES[e.payload] && current !== e.payload) void switchTab(e.payload);
+    goto(e.payload);
   });
   await listen<UpdateInfo>("update-state", (e) => {
     S.update.info = e.payload;
     if (current === "general" || current === "dashboard") backgroundRender();
+    autoOpenUpdateDialog();
   });
   await listen<number>("update-progress", (e) => {
-    S.update.progress = e.payload;
+    onUpdateProgress(e.payload);
     if (current === "general") backgroundRender();
   });
   await listen<TargetStatus[]>("immersive-status", (e) => {

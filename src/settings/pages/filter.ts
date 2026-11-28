@@ -1,13 +1,11 @@
 // 过滤规则与最近过滤诊断：全局与按应用规则编辑、实时过滤日志、一键纠错
 import { invoke } from "@tauri-apps/api/core";
-import { FilterEvent, FilterRuleSet, StoreAppSummary, cfg, loadStats, loadView, saveConfig } from "../state";
+import { FilterEvent, FilterRuleSet, cfg, loadStats, loadView, saveConfig } from "../state";
 import { t } from "../../i18n";
-import { dropdown, emptyState, errText, h, icon, pageHead, toast } from "../ui";
-
-const GLOBAL_SCOPE = "__global__";
+import { emptyState, errText, h, icon, pageHead, toast } from "../ui";
+import { GLOBAL_SCOPE, Scope, collectScopes as collectAllScopes, loadScopeApps, normalizeAppId, scopeDropdown as scopePicker } from "./appScope";
 
 interface Draft {
-  keepTerms: string;
   keepPatterns: string;
   forceTranslate: string;
 }
@@ -17,18 +15,11 @@ let draft: Draft | null = null;
 /** 规则编辑框有未保存修改时，外部 config-changed 不覆盖正在编辑的内容 */
 let dirty = false;
 let onlyKept = true;
-let apps: StoreAppSummary[] = [];
 let events: FilterEvent[] = [];
 
 export const filterDirty = () => dirty;
 export function resetFilterDraft() {
   if (!dirty) draft = null;
-}
-
-function normalizeAppId(raw: string): string {
-  const s = raw.trim();
-  if (!s) return "";
-  return (s.split(/[\\/]/).pop() ?? s).trim().toLowerCase();
 }
 
 function dedup(items: string[]): string[] {
@@ -47,49 +38,22 @@ function parseLines(raw: string): string[] {
   return dedup(raw.split(/\r?\n/));
 }
 
-function collectScopes(): { id: string; label: string }[] {
-  const map = new Map<string, string>();
-  const c = cfg();
-
-  for (const tg of c.immersive.targets) {
-    const id = normalizeAppId(tg.exe) || normalizeAppId(tg.name);
-    if (!id) continue;
-    if (!map.has(id)) map.set(id, tg.name.trim() || id);
-  }
-  for (const key of Object.keys(c.filter?.apps ?? {})) {
-    const id = normalizeAppId(key);
-    if (!id) continue;
-    if (!map.has(id)) map.set(id, id);
-  }
-  for (const a of apps) {
-    const id = normalizeAppId(a.id);
-    if (!id) continue;
-    if (!map.has(id) || map.get(id) === id) {
-      map.set(id, a.name.trim() || id);
-    }
-  }
-
-  return [
-    { id: GLOBAL_SCOPE, label: t("filter.scope.global") },
-    ...[...map.entries()].sort((a, b) => a[1].localeCompare(b[1])).map(([id, label]) => ({ id, label })),
-  ];
+function collectScopes(): Scope[] {
+  return collectAllScopes(Object.keys(cfg().filter?.apps ?? {}));
 }
 
 function readDraft(scope: string): Draft {
   const c = cfg();
   if (scope === GLOBAL_SCOPE) {
     return {
-      keepTerms: (c.filter?.keep_terms ?? []).join("\n"),
       keepPatterns: (c.filter?.keep_patterns ?? []).join("\n"),
       forceTranslate: (c.filter?.force_translate ?? []).join("\n"),
     };
   }
-  const keepTerms: string[] = [];
   const keepPatterns: string[] = [];
   const forceTranslate: string[] = [];
   const pushSet = (rs?: FilterRuleSet) => {
     if (!rs) return;
-    keepTerms.push(...(rs.keep_terms ?? []));
     keepPatterns.push(...(rs.keep_patterns ?? []));
     forceTranslate.push(...(rs.force_translate ?? []));
   };
@@ -104,26 +68,18 @@ function readDraft(scope: string): Draft {
     }
   }
   return {
-    keepTerms: dedup(keepTerms).join("\n"),
     keepPatterns: dedup(keepPatterns).join("\n"),
     forceTranslate: dedup(forceTranslate).join("\n"),
   };
 }
 
-/** 作用范围下拉：全局 + 各软件（显示名与程序名不同时把程序名作小字提示） */
-function scopeDropdown(scopes: { id: string; label: string }[], onPick: () => void): HTMLElement {
-  const options = scopes.map((s) => ({ value: s.id, label: s.label, hint: s.id !== GLOBAL_SCOPE && s.label !== s.id ? s.id : undefined }));
-  return dropdown(
-    options,
-    selectedScope,
-    (v) => {
-      selectedScope = v;
-      dirty = false;
-      draft = null;
-      onPick();
-    },
-    { title: t("filter.scope.label") },
-  );
+function scopeDropdown(scopes: Scope[], onPick: () => void): HTMLElement {
+  return scopePicker(scopes, selectedScope, (v) => {
+    selectedScope = v;
+    dirty = false;
+    draft = null;
+    onPick();
+  });
 }
 
 /** 软件列表加载完后刷新作用范围下拉的选项 */
@@ -165,12 +121,6 @@ export function renderFilter(root: HTMLElement) {
     }),
   );
 
-  const keepTermsEl = h("textarea", { class: "rule-box", placeholder: t("filter.keepTerms.ph") }, current.keepTerms);
-  keepTermsEl.addEventListener("input", () => {
-    current.keepTerms = keepTermsEl.value;
-    dirty = true;
-  });
-
   const keepPatternsEl = h("textarea", { class: "rule-box", placeholder: t("filter.keepPatterns.ph") }, current.keepPatterns);
   keepPatternsEl.addEventListener("input", () => {
     current.keepPatterns = keepPatternsEl.value;
@@ -185,23 +135,18 @@ export function renderFilter(root: HTMLElement) {
 
   const save = async () => {
     const nextRule: FilterRuleSet = {
-      keep_terms: parseLines(current.keepTerms),
       keep_patterns: parseLines(current.keepPatterns),
       force_translate: parseLines(current.forceTranslate),
     };
-    const empty =
-      nextRule.keep_terms.length === 0 &&
-      nextRule.keep_patterns.length === 0 &&
-      nextRule.force_translate.length === 0;
+    const empty = nextRule.keep_patterns.length === 0 && nextRule.force_translate.length === 0;
     const savedScope = selectedScope;
     const prevDraft = { ...current };
 
     dirty = false;
     draft = null;
     const ok = await saveConfig((c) => {
-      c.filter ??= { keep_terms: [], keep_patterns: [], force_translate: [], apps: {} };
+      c.filter ??= { keep_patterns: [], force_translate: [], apps: {} };
       if (savedScope === GLOBAL_SCOPE) {
-        c.filter.keep_terms = nextRule.keep_terms;
         c.filter.keep_patterns = nextRule.keep_patterns;
         c.filter.force_translate = nextRule.force_translate;
       } else {
@@ -218,7 +163,7 @@ export function renderFilter(root: HTMLElement) {
           const exeId = normalizeAppId(tg.exe);
           const nameId = normalizeAppId(tg.name);
           if ((exeId && exeId === savedScope) || (nameId && nameId === savedScope)) {
-            tg.filter = { keep_terms: [], keep_patterns: [], force_translate: [] };
+            tg.filter = { keep_patterns: [], force_translate: [] };
           }
         }
       }
@@ -254,7 +199,6 @@ export function renderFilter(root: HTMLElement) {
       h(
         "div",
         { class: "filter-rules-grid" },
-        h("label", { class: "field" }, h("span", {}, t("filter.keepTerms.label")), keepTermsEl),
         h("label", { class: "field" }, h("span", {}, t("filter.keepPatterns.label")), keepPatternsEl),
         h("label", { class: "field" }, h("span", {}, t("filter.forceTranslate.label")), forceEl),
       ),
@@ -373,15 +317,14 @@ async function loadFilterEvents() {
 
 export async function loadFilterPage() {
   try {
-    const [appList, evs] = await Promise.all([
-      invoke<StoreAppSummary[]>("store_apps"),
+    const [, evs] = await Promise.all([
+      loadScopeApps(),
       invoke<FilterEvent[]>("filter_events", {
         limit: 100,
         appId: selectedScope === GLOBAL_SCOPE ? null : selectedScope,
         onlyKept,
       }),
     ]);
-    apps = appList ?? [];
     events = evs ?? [];
     populateScopeSelect();
     renderLog();

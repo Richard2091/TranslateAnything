@@ -79,7 +79,7 @@ On the **Engines** page you can switch between **translation engines / LLM** wit
 ## Gets faster the more you use it
 
 - **Translation memory**: translated text is stored locally and reused next time without going online. You can search and edit it; edited translations take effect immediately and are never overwritten
-- **Glossary**: pin how certain terms are translated (e.g. New → 新建); a built-in list of common interface terms is included
+- **Glossary**: pin how certain terms are translated (e.g. New → 新建) or keep them as is, globally or per app; a built-in list of common interface terms is included
 - The translation memory can be moved to another folder at any time, and its file moves with it
 
 ## Download

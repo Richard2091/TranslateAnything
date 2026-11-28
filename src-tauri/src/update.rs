@@ -71,6 +71,8 @@ pub struct UpdateInfo {
     /// Release 页面
     pub url: String,
     pub published_at: String,
+    /// 更新说明（Release 正文，Markdown，上中文下英文）；镜像清单里没有时为空
+    pub notes: String,
     /// 本机可用的安装包（安装版为 NSIS 安装程序，便携版为 zip）
     pub asset_name: Option<String>,
     /// 安装包的 GitHub 原始下载地址（走镜像时在前面加镜像前缀）
@@ -210,8 +212,18 @@ pub async fn check(app: &AppHandle) -> Result<UpdateInfo, String> {
         };
         let Some((i, result)) = next else { break };
         match result {
-            Ok(info) => {
+            Ok(mut info) => {
                 grace.get_or_insert_with(|| tokio::time::Instant::now() + CHECK_GRACE);
+                // 更新说明只有官方接口给：同一版本时补到选中的结果上
+                if let Some(b) = &mut best
+                    && b.latest == info.latest
+                {
+                    if b.notes.is_empty() {
+                        b.notes = info.notes.clone();
+                    } else if info.notes.is_empty() {
+                        info.notes = b.notes.clone();
+                    }
+                }
                 if best.as_ref().is_none_or(|b| better(&info, b)) {
                     best = Some(info);
                 }
@@ -315,6 +327,7 @@ fn parse_release(v: &Value, current: &str, arch: &str, portable: bool) -> Option
         current: current.to_string(),
         url: release_page(&latest),
         published_at: v.get("published_at").and_then(Value::as_str).unwrap_or_default().to_string(),
+        notes: v.get("body").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
         asset_url: name.as_deref().map(|n| asset_link(&latest, n)),
         asset_size: asset.and_then(|a| a.get("size")?.as_u64()).unwrap_or(0),
         sha256: asset
@@ -344,6 +357,7 @@ fn parse_manifest(v: &Value, current: &str, arch: &str, portable: bool, via: Str
         current: current.to_string(),
         url: release_page(&latest),
         published_at: v.get("published_at").and_then(Value::as_str).unwrap_or_default().to_string(),
+        notes: v.get("notes").and_then(Value::as_str).unwrap_or_default().trim().to_string(),
         asset_url: name.as_deref().map(|n| asset_link(&latest, n)),
         asset_size: asset.and_then(|a| a.get("size")?.as_u64()).unwrap_or(0),
         sha256: asset.and_then(|a| a.get("sha256")?.as_str()).and_then(normalize_sha256),

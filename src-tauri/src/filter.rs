@@ -1,13 +1,13 @@
 //! 翻译过滤：统一判断一段文本该不该翻译（悬浮窗与沉浸模式共用）。
 //!
 //! 按分层优先级判断：
-//! 1. 用户规则（强制翻译 > 不翻译词表 > 不翻译正则，全局 + 按应用）
+//! 1. 用户规则（强制翻译 > 不翻译正则，全局 + 按应用）。要保留原文的词写在术语表里，翻译链路先查术语表
 //! 2. 内置确定性模式（长度、无字母、URL/邮箱、路径/文件名、版本号/日期、快捷键、代码标识符、型号+版本）
 //! 2.5 代码块与结构化文本（JSON/XML/SQL/Diff、命令行、日志与报错堆栈、符号密度/代码关键词打分）
 //! 3. 语言识别（短词只看字符集，长文本且高置信度再用 `whatlang`）
 //! 4. 拿不准时默认放行翻译，后续由译文库记住引擎/大模型判定的"保留原文"。
 
-use crate::config::{Config, FilterRuleSet, normalize_app_id};
+use crate::config::{Config, normalize_app_id};
 use regex::Regex;
 use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
@@ -160,9 +160,6 @@ pub fn classify(cfg: &Config, text: &str, ctx: &FilterContext<'_>) -> Decision {
     if matches_term(&rules.force_translate, core) {
         return Decision::ForceTranslate;
     }
-    if matches_term(&rules.keep_terms, core) {
-        return Decision::Keep(Reason::UserKeepTerm);
-    }
     if matches_pattern(&rules.keep_patterns, core) {
         return Decision::Keep(Reason::UserKeepPattern);
     }
@@ -213,10 +210,7 @@ pub fn classify(cfg: &Config, text: &str, ctx: &FilterContext<'_>) -> Decision {
 
 /// 在有效规则基础上判断术语匹配（忽略首尾空白；纯 ASCII 忽略大小写）
 fn matches_term(list: &[String], core: &str) -> bool {
-    list.iter().any(|t| {
-        let t = t.trim();
-        !t.is_empty() && (t == core || (t.is_ascii() && core.is_ascii() && t.eq_ignore_ascii_case(core)))
-    })
+    list.iter().any(|t| term_eq(t, core))
 }
 
 fn matches_pattern(patterns: &[String], core: &str) -> bool {
@@ -241,9 +235,10 @@ fn matches_pattern(patterns: &[String], core: &str) -> bool {
     false
 }
 
-/// 供上层获取合并后的过滤规则，提取需要传给大模型的保留词
-pub fn active_keep_terms(cfg: &Config, app_id: &str) -> FilterRuleSet {
-    cfg.effective_filter(Some(app_id))
+/// 整条匹配一个词：忽略首尾空白；纯 ASCII 忽略大小写（强制翻译与术语表共用）
+pub fn term_eq(term: &str, core: &str) -> bool {
+    let t = term.trim();
+    !t.is_empty() && (t == core || (t.is_ascii() && core.is_ascii() && t.eq_ignore_ascii_case(core)))
 }
 
 fn has_cjk(s: &str) -> bool {
@@ -666,17 +661,15 @@ mod tests {
     fn 用户规则优先级与环形日志去重() {
         clear_events();
         let mut cfg = Config::default();
-        cfg.filter.keep_terms.push("Artifacts".into());
         cfg.filter.keep_patterns.push("^ERR-\\d+$".into());
         cfg.filter.apps.insert(
             "claude.exe".into(),
-            FilterRuleSet {
-                keep_terms: vec![],
-                keep_patterns: vec![],
+            crate::config::FilterRuleSet {
                 force_translate: vec!["Opus 5.5".into()],
+                ..Default::default()
             },
         );
-        assert_eq!(classify(&cfg, "Artifacts", &ctx("zh-CN")), Decision::Keep(Reason::UserKeepTerm));
+        assert_eq!(classify(&cfg, "Artifacts", &ctx("zh-CN")), Decision::Translate, "保留原文的词改由术语表处理");
         assert_eq!(classify(&cfg, "ERR-404", &ctx("zh-CN")), Decision::Keep(Reason::UserKeepPattern));
         assert_eq!(classify(&cfg, "Opus 5.5", &ctx("zh-CN")), Decision::ForceTranslate);
 
