@@ -259,6 +259,8 @@ pub fn create_with_id(id: &str, kind: &str, cfg: &ProviderConfig) -> Result<Box<
         "openai" => Box::new(openai::OpenAICompatible::new_with_id(id, cfg)?),
         "anthropic" => Box::new(anthropic::Anthropic::new_with_id(id, cfg)?),
         "gemini" => Box::new(gemini::Gemini::new_with_id(id, cfg)?),
+        // 新建的自定义接口还没选协议（类型留空时 kind 回退成实例 id，AI 实例 id 都以 ai_ 开头）
+        other if is_unset_ai(other) => return Err(TranslateError::Config(t!("err.engine.no_protocol"))),
         other => {
             let ids: Vec<_> = CATALOG.iter().map(|e| e.id).collect();
             return Err(TranslateError::Config(t!(
@@ -268,6 +270,11 @@ pub fn create_with_id(id: &str, kind: &str, cfg: &ProviderConfig) -> Result<Box<
             )));
         }
     })
+}
+
+/// AI 供应商实例尚未选择协议
+fn is_unset_ai(kind: &str) -> bool {
+    kind.starts_with("ai_")
 }
 
 /// 按引擎类型创建 Provider
@@ -802,6 +809,9 @@ async fn retry_misdetected(engine: &dyn Translator, texts: &[String], out: &mut 
 
 /// 大模型接口可用的模型 id（已排序去重）
 pub async fn list_models(kind: &str, cfg: &ProviderConfig) -> Result<Vec<String>, String> {
+    if is_unset_ai(kind) {
+        return Err(t!("err.engine.no_protocol"));
+    }
     let res = match kind {
         "anthropic" => anthropic::list_models(cfg).await,
         "gemini" => gemini::list_models(cfg).await,

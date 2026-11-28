@@ -285,10 +285,12 @@ export const langs = (): [string, string][] => LANG_TAGS.map((tag) => [tag, lang
 export const AI_KINDS = new Set(["openai", "anthropic", "gemini"]);
 
 export const kindOf = (c: Config, id: string) => (c.engines?.[id]?.type || "").trim() || id;
-export const isLLM = (c: Config, id: string) => AI_KINDS.has(kindOf(c, id));
+/** 新建的自定义接口还没选协议：AI 实例 id 都以 ai_ 开头，类型留空 */
+export const isUnsetAi = (c: Config, id: string) => id.startsWith("ai_") && !(c.engines?.[id]?.type || "").trim();
+export const isLLM = (c: Config, id: string) => AI_KINDS.has(kindOf(c, id)) || isUnsetAi(c, id);
 export const engineInfo = (kind: string) => S.catalog.find((e) => e.id === kind);
 export const providerLabel = (c: Config, id: string) =>
-  c.engines?.[id]?.name?.trim() || engineInfo(kindOf(c, id))?.name || id;
+  c.engines?.[id]?.name?.trim() || (isUnsetAi(c, id) ? t("engines.preset.custom") : engineInfo(kindOf(c, id))?.name || id);
 export const engineLabel = providerLabel;
 
 /** 配置中所有的 AI 供应商实例 id */

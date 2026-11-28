@@ -1,5 +1,6 @@
 // AI 翻译：多供应商管理（OpenAI 兼容 / Anthropic 原生 / Gemini 原生）、多启 Fallback 与排序
 import {
+  AI_KINDS,
   S,
   aiChain,
   aiIds,
@@ -14,23 +15,38 @@ import {
   testEngine,
 } from "../state";
 import { t } from "../../i18n";
-import { confirmDialog, dropdown, emptyState, field, h, icon, openDialog, pageHead, section, switchEl, toast } from "../ui";
+import {
+  confirmDialog,
+  dropdown,
+  emptyState,
+  field,
+  h,
+  icon,
+  openDialog,
+  pageHead,
+  section,
+  switchEl,
+  toast,
+} from "../ui";
 import {
   AI_PRESETS,
   blankProvider,
   defaultBase,
   hostOf,
   paramFields,
+  presetMatches,
   presetName,
+  presetOf,
   protocolLabel,
   protocolOptions,
   setParam,
   sortable,
   statusBanner,
   testButton,
-  testNote,
+  wireParams,
   type AiPreset,
 } from "./engineShared";
+import { providerLogo } from "../logos";
 
 const opened = new Set<string>();
 
@@ -49,16 +65,22 @@ function uniqueName(c: ReturnType<typeof cfg>, baseName: string): string {
   return `${baseName} ${i}`;
 }
 
-async function addFromPreset(preset: AiPreset) {
+/** 按预设新增；自定义接口新增一条空白配置（不选协议、不填名称和地址），由用户自己填 */
+function addFromPreset(preset: AiPreset) {
+  if (preset.group === "custom") return addProvider("custom", "", "", "");
+  return addProvider(preset.id, presetName(preset), preset.kind, preset.baseUrl);
+}
+
+async function addProvider(slug: string, baseName: string, kind: string, baseUrl: string) {
   const c = cfg();
-  const id = nextProviderId(c, preset.id);
-  const name = uniqueName(c, presetName(preset));
+  const id = nextProviderId(c, slug);
+  const name = baseName && uniqueName(c, baseName);
   const ok = await saveConfig((x) => {
     x.engines[id] = {
       ...blankProvider(),
       name,
-      type: preset.kind,
-      base_url: preset.baseUrl,
+      type: kind,
+      base_url: baseUrl,
     };
   }, "");
   if (!ok) return;
@@ -134,45 +156,71 @@ function moveBy(id: string, d: number) {
 
 function openAddDialog() {
   const groups: { title: string; items: AiPreset[] }[] = [
-    { title: t("ai.add.native"), items: AI_PRESETS.filter((p) => p.group === "native") },
-    { title: t("ai.add.openai"), items: AI_PRESETS.filter((p) => p.group === "openai" || p.group === "custom") },
+    { title: t("ai.add.vendor"), items: AI_PRESETS.filter((p) => p.group === "vendor") },
+    { title: t("ai.add.platform"), items: AI_PRESETS.filter((p) => p.group === "platform") },
+    { title: t("ai.add.local"), items: AI_PRESETS.filter((p) => p.group === "local") },
+    { title: t("ai.add.custom"), items: AI_PRESETS.filter((p) => p.group === "custom") },
   ];
-  const dlg = openDialog(
-    t("ai.add.title"),
-    h(
-      "div",
-      {},
-      h("p", { class: "muted", style: "margin-top:0" }, t("ai.add.desc")),
-      ...groups.map((g) =>
+  const pick = (p: AiPreset) => {
+    dlg.close();
+    void addFromPreset(p);
+  };
+  // 每个预设一个按钮，搜索时只切换显隐，不重建
+  const items = groups.map((g) => ({
+    group: g,
+    buttons: g.items.map((p) => ({
+      preset: p,
+      el: h(
+        "button",
+        { type: "button", class: "preset-item", onclick: () => pick(p) },
+        providerLogo(p.group === "custom" ? undefined : p.id),
         h(
           "div",
-          { class: "preset-group" },
-          h("div", { class: "preset-group-title" }, g.title),
-          h(
-            "div",
-            { class: "preset-grid" },
-            ...g.items.map((p) =>
-              h(
-                "button",
-                {
-                  type: "button",
-                  class: "preset-item",
-                  onclick: () => {
-                    dlg.close();
-                    void addFromPreset(p);
-                  },
-                },
-                h("div", { class: "preset-name" }, presetName(p)),
-                h("div", { class: "preset-sub" }, p.hint || protocolLabel(p.kind)),
-              ),
-            ),
-          ),
+          { class: "preset-text" },
+          h("div", { class: "preset-name" }, presetName(p)),
+          h("div", { class: "preset-sub" }, p.group === "custom" ? t("ai.custom.hint") : p.hint || protocolLabel(p.kind)),
         ),
       ),
-    ),
-    [h("button", { class: "btn", onclick: () => dlg.close() }, t("common.cancel"))],
-    { wide: true },
+    })),
+  }));
+  const groupEls = items.map(({ group, buttons }) =>
+    h("div", { class: "preset-group" }, h("div", { class: "preset-group-title" }, group.title), h("div", { class: "preset-grid" }, ...buttons.map((b) => b.el))),
   );
+  const empty = h("p", { class: "muted preset-empty" }, t("ai.add.noMatch"));
+  empty.hidden = true;
+  const search = h("input", { type: "search", placeholder: t("ai.add.search") });
+  const visible = () => items.flatMap((g) => g.buttons).filter((b) => !b.el.hidden);
+  const filter = () => {
+    const q = search.value;
+    let hits = 0;
+    for (const { buttons } of items)
+      for (const b of buttons) {
+        b.el.hidden = !presetMatches(b.preset, q);
+        if (!b.el.hidden) hits++;
+      }
+    // 一个都没命中时留下"自定义"，总有路可走
+    const custom = items.flatMap((g) => g.buttons).find((b) => b.preset.group === "custom");
+    if (hits === 0 && custom) custom.el.hidden = false;
+    items.forEach((g, i) => (groupEls[i].hidden = g.buttons.every((b) => b.el.hidden)));
+    empty.hidden = hits > 0;
+  };
+  search.addEventListener("input", filter);
+  search.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const first = visible()[0];
+    if (first) pick(first.preset);
+  });
+  const list = h("div", { class: "preset-list" }, empty, ...groupEls);
+  const body = h(
+    "div",
+    {},
+    h("div", { class: "preset-search" }, h("p", { class: "muted" }, t("ai.add.desc")), h("div", { class: "search" }, icon("search"), search)),
+    list,
+  );
+  const actions = [h("button", { class: "btn", onclick: () => dlg.close() }, t("common.cancel"))];
+  const dlg = openDialog(t("ai.add.title"), body, actions, { wide: true });
+  // 固定列表区高度，筛选时对话框不跟着跳
+  requestAnimationFrame(() => (list.style.minHeight = `${list.offsetHeight}px`));
 }
 
 function aiRow(id: string, chain: string[]): HTMLElement {
@@ -221,24 +269,16 @@ function aiRow(id: string, chain: string[]): HTMLElement {
     icon("trash"),
   );
 
-  const row = h(
-    "div",
-    { class: `engine-row${on ? " on" : ""}${open ? " open" : ""}`, "data-id": id },
-    grip,
-    h(
-      "button",
-      {
-        class: "engine-pick",
-        type: "button",
-        "aria-expanded": String(open),
-        title: t("engines.order.params"),
-        onclick: () => {
-          if (opened.has(id)) opened.delete(id);
-          else opened.add(id);
-          refresh();
-        },
-      },
+  const pick = h(
+    "button",
+    {
+      class: "engine-pick",
+      type: "button",
+      "aria-expanded": String(open),
+      title: t("engines.order.params"),
+    },
       h("span", { class: "engine-num" }, on ? String(pos + 1) : ""),
+      providerLogo(presetOf(kind, p.base_url)?.id),
       h(
         "div",
         { class: "grow" },
@@ -246,24 +286,21 @@ function aiRow(id: string, chain: string[]): HTMLElement {
           "div",
           { class: "engine-name" },
           name,
-          h("span", { class: "tag" }, protocolLabel(kind)),
+          h("span", { class: `tag${AI_KINDS.has(kind) ? "" : " warn"}` }, protocolLabel(kind)),
           S.cooldowns.includes(id) && h("span", { class: "tag warn" }, t("engines.tag.cooling")),
         ),
         h("div", { class: "desc clip" }, summary),
       ),
-      h("span", { class: "engine-chev" }, icon("down")),
-    ),
-    testButton(id),
-    copyBtn,
-    delBtn,
-    sw,
+    h("span", { class: "engine-chev" }, icon("down")),
   );
 
-  if (open) {
+  const row = h("div", { class: `engine-row${on ? " on" : ""}${open ? " open" : ""}`, "data-id": id }, grip, pick, testButton(id), copyBtn, delBtn, sw);
+
+  const buildParams = () => {
     const nameInput = h("input", {
       type: "text",
-      value: p.name?.trim() || name,
-      placeholder: t("engines.field.name.ph"),
+      value: p.name?.trim() ?? "",
+      placeholder: p.name?.trim() ? t("engines.field.name.ph") : name,
       "data-k": `eng-${id}-name`,
       autocomplete: "off",
       spellcheck: false,
@@ -284,15 +321,14 @@ function aiRow(id: string, chain: string[]): HTMLElement {
           }
         });
       },
-      { width: "100%" },
+      { width: "100%", placeholder: t("ai.custom.pickProtocol") },
     );
 
     const extra = [field(t("engines.field.name.label"), nameInput), field(t("engines.field.protocol.label"), protoDrop)];
-    row.append(h("div", { class: "engine-params pop-in" }, paramFields(id, ["base_url", "api_key", "model", "concurrency", "proxy"], true, extra), testNote(id)));
-  } else {
-    const n = testNote(id, "");
-    if (n) row.append(h("div", { class: "engine-params" }, n));
-  }
+    return h("div", { class: "engine-params" }, paramFields(id, ["base_url", "api_key", "model", "concurrency", "proxy"], true, extra));
+  };
+
+  wireParams(row, pick, id, opened, buildParams);
   return row;
 }
 
@@ -319,7 +355,7 @@ export function renderAi(root: HTMLElement) {
         },
   );
 
-  const addBtn = h("button", { type: "button", class: "btn primary sm", onclick: openAddDialog }, icon("plus"), t("ai.addBtn"));
+  const addBtn = h("button", { type: "button", class: "btn primary sm", onclick: () => openAddDialog() }, icon("plus"), t("ai.addBtn"));
 
   let listEl: HTMLElement;
   if (!allIds.length) {
@@ -333,7 +369,12 @@ export function renderAi(root: HTMLElement) {
         "div",
         { class: "preset-quick" },
         ...quick.map((p) =>
-          h("button", { type: "button", class: "btn sm", onclick: () => void addFromPreset(p) }, icon("plus"), presetName(p)),
+          h(
+            "button",
+            { type: "button", class: "btn sm", onclick: () => void addFromPreset(p) },
+            icon("plus"),
+            presetName(p),
+          ),
         ),
       ),
     );

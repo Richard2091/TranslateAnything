@@ -39,7 +39,8 @@ export function hostOf(url: string): string {
 export function protocolLabel(kind: string): string {
   if (kind === "anthropic") return t("engines.protocol.anthropic");
   if (kind === "gemini") return t("engines.protocol.gemini");
-  return t("engines.protocol.openai");
+  if (kind === "openai") return t("engines.protocol.openai");
+  return t("ai.custom.noProtocol");
 }
 
 export function protocolOptions(): DropOption<string>[] {
@@ -57,29 +58,46 @@ export interface AiPreset {
   kind: "openai" | "anthropic" | "gemini";
   baseUrl: string;
   hint: string;
-  group: "native" | "openai" | "custom";
+  /** 按来源分组：模型厂商 / 三方平台 / 本地模型 / 自定义；协议是实现细节，不作分组依据 */
+  group: "vendor" | "platform" | "local" | "custom";
+  /** 搜索用的别名（中英文名、产品名），不显示；前端只拿得到当前语言的文案，另一种语言的名称靠这里补 */
+  keywords?: string;
 }
 
 export const AI_PRESETS: AiPreset[] = [
-  { id: "anthropic", name: "Anthropic Claude", kind: "anthropic", baseUrl: "", hint: "https://api.anthropic.com", group: "native" },
-  { id: "gemini", name: "Google Gemini", kind: "gemini", baseUrl: "", hint: "https://generativelanguage.googleapis.com", group: "native" },
-  { id: "openai", name: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1", hint: "https://api.openai.com/v1", group: "openai" },
-  { id: "deepseek", name: "DeepSeek", kind: "openai", baseUrl: "https://api.deepseek.com/v1", hint: "https://api.deepseek.com/v1", group: "openai" },
-  { id: "dashscope", nameKey: "engines.preset.dashscope", kind: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "dashscope.aliyuncs.com", group: "openai" },
-  { id: "volcengine", nameKey: "engines.preset.volcengine", kind: "openai", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", hint: "ark.cn-beijing.volces.com", group: "openai" },
-  { id: "zhipu", nameKey: "engines.preset.zhipu", kind: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", hint: "open.bigmodel.cn", group: "openai" },
-  { id: "moonshot", nameKey: "engines.preset.moonshot", kind: "openai", baseUrl: "https://api.moonshot.cn/v1", hint: "api.moonshot.cn", group: "openai" },
-  { id: "siliconflow", nameKey: "engines.preset.siliconflow", kind: "openai", baseUrl: "https://api.siliconflow.cn/v1", hint: "api.siliconflow.cn", group: "openai" },
-  { id: "openrouter", name: "OpenRouter", kind: "openai", baseUrl: "https://openrouter.ai/api/v1", hint: "openrouter.ai", group: "openai" },
-  { id: "groq", name: "Groq", kind: "openai", baseUrl: "https://api.groq.com/openai/v1", hint: "api.groq.com", group: "openai" },
-  { id: "mistral", name: "Mistral", kind: "openai", baseUrl: "https://api.mistral.ai/v1", hint: "api.mistral.ai", group: "openai" },
-  { id: "xai", name: "xAI Grok", kind: "openai", baseUrl: "https://api.x.ai/v1", hint: "api.x.ai", group: "openai" },
-  { id: "ollama", nameKey: "engines.preset.ollama", kind: "openai", baseUrl: "http://localhost:11434/v1", hint: "http://localhost:11434/v1", group: "openai" },
-  { id: "lmstudio", nameKey: "engines.preset.lmstudio", kind: "openai", baseUrl: "http://localhost:1234/v1", hint: "http://localhost:1234/v1", group: "openai" },
-  { id: "custom", nameKey: "engines.preset.custom", kind: "openai", baseUrl: "", hint: "", group: "custom" },
+  { id: "openai", name: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1", hint: "https://api.openai.com/v1", group: "vendor", keywords: "ChatGPT GPT" },
+  { id: "anthropic", name: "Anthropic Claude", kind: "anthropic", baseUrl: "", hint: "https://api.anthropic.com", group: "vendor" },
+  { id: "gemini", name: "Google Gemini", kind: "gemini", baseUrl: "", hint: "https://generativelanguage.googleapis.com", group: "vendor", keywords: "谷歌" },
+  { id: "deepseek", name: "DeepSeek", kind: "openai", baseUrl: "https://api.deepseek.com/v1", hint: "https://api.deepseek.com/v1", group: "vendor", keywords: "深度求索" },
+  { id: "dashscope", nameKey: "engines.preset.dashscope", kind: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "dashscope.aliyuncs.com", group: "vendor", keywords: "阿里云百炼 通义千问 Alibaba Cloud Model Studio Qwen Bailian" },
+  { id: "volcengine", nameKey: "engines.preset.volcengine", kind: "openai", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", hint: "ark.cn-beijing.volces.com", group: "vendor", keywords: "火山方舟 豆包 字节跳动 Volcengine Ark Doubao ByteDance" },
+  { id: "zhipu", nameKey: "engines.preset.zhipu", kind: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", hint: "open.bigmodel.cn", group: "vendor", keywords: "智谱 Zhipu GLM ChatGLM" },
+  { id: "moonshot", nameKey: "engines.preset.moonshot", kind: "openai", baseUrl: "https://api.moonshot.cn/v1", hint: "api.moonshot.cn", group: "vendor", keywords: "月之暗面 Moonshot Kimi" },
+  { id: "mistral", name: "Mistral", kind: "openai", baseUrl: "https://api.mistral.ai/v1", hint: "api.mistral.ai", group: "vendor" },
+  { id: "xai", name: "xAI Grok", kind: "openai", baseUrl: "https://api.x.ai/v1", hint: "api.x.ai", group: "vendor" },
+  { id: "openrouter", name: "OpenRouter", kind: "openai", baseUrl: "https://openrouter.ai/api/v1", hint: "openrouter.ai", group: "platform" },
+  { id: "siliconflow", nameKey: "engines.preset.siliconflow", kind: "openai", baseUrl: "https://api.siliconflow.cn/v1", hint: "api.siliconflow.cn", group: "platform", keywords: "硅基流动 SiliconFlow" },
+  { id: "ollama", nameKey: "engines.preset.ollama", kind: "openai", baseUrl: "http://localhost:11434/v1", hint: "http://localhost:11434/v1", group: "local", keywords: "Ollama 本地 local" },
+  { id: "lmstudio", nameKey: "engines.preset.lmstudio", kind: "openai", baseUrl: "http://localhost:1234/v1", hint: "http://localhost:1234/v1", group: "local", keywords: "LM Studio 本地 local" },
+  { id: "custom", nameKey: "engines.preset.custom", kind: "openai", baseUrl: "", hint: "", group: "custom", keywords: "自定义 Custom" },
 ];
 
 export const presetName = (p: AiPreset): string => p.name ?? (p.nameKey ? t(p.nameKey) : p.id);
+
+/** 已配置的供应商对应哪个预设（用来显示 logo）：按接口地址的域名匹配，地址留空的按协议找官方预设 */
+export function presetOf(kind: string, baseUrl: string): AiPreset | undefined {
+  const host = hostOf(baseUrl);
+  if (host) return AI_PRESETS.find((p) => p.group !== "custom" && hostOf(p.baseUrl || p.hint) === host);
+  return AI_PRESETS.find((p) => p.group !== "custom" && p.kind === kind && !p.baseUrl);
+}
+
+/** 预设是否匹配搜索词：按空格拆成多个词，每个词都要命中名称（中英文）、id、地址或协议之一，不区分大小写 */
+export function presetMatches(p: AiPreset, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const hay = [presetName(p), p.id, p.baseUrl, p.hint, p.kind, p.keywords ?? ""].join(" ").toLowerCase();
+  return terms.every((w) => hay.includes(w));
+}
 
 // ───────────────────────── 候选项 ─────────────────────────
 
@@ -134,7 +152,6 @@ const BASE_PRESETS: Record<string, [string, string][]> = {
     ["https://api.moonshot.cn/v1", "@moonshot"],
     ["https://api.siliconflow.cn/v1", "@siliconflow"],
     ["https://openrouter.ai/api/v1", "OpenRouter"],
-    ["https://api.groq.com/openai/v1", "Groq"],
     ["https://api.mistral.ai/v1", "Mistral"],
     ["https://api.x.ai/v1", "xAI Grok"],
     ["http://localhost:11434/v1", "@ollama"],

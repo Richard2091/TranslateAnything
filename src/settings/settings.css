@@ -2347,12 +2347,12 @@ tr.manual td:first-child {
   animation: rise 0.25s var(--ease-out) both;
 }
 
+/* 四周留 3px 给输入框的焦点光环（滚动容器会裁掉溢出部分），再用负外边距抵消，内容位置不变 */
 .dialog-body {
-  margin-top: 12px;
+  margin: 9px -10px -3px -3px;
+  padding: 3px 10px 3px 3px;
   max-height: min(60vh, 520px);
   overflow-y: auto;
-  margin-right: -10px;
-  padding-right: 10px;
 }
 
 #modal .dialog .actions .spacer {
@@ -2757,6 +2757,32 @@ input.hotkey-input.recording::placeholder {
   color: var(--bad);
 }
 
+/* 说明 + 搜索框吸顶，列表在下面滚动 */
+.preset-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  padding-bottom: 14px;
+}
+
+#modal .dialog .preset-search .muted {
+  margin: 0 0 10px;
+}
+
+.preset-empty {
+  margin: 4px 0 12px;
+}
+
+.preset-item[hidden],
+.preset-group[hidden] {
+  display: none;
+}
+
+.preset-group[hidden] + .preset-group {
+  margin-top: 0;
+}
+
 .preset-group + .preset-group {
   margin-top: 14px;
 }
@@ -2776,9 +2802,9 @@ input.hotkey-input.recording::placeholder {
 
 .preset-item {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
   padding: 9px 11px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
@@ -2794,6 +2820,46 @@ input.hotkey-input.recording::placeholder {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
+
+.preset-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 服务商 logo 方块（见 logos/index.ts） */
+.logo {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.logo svg {
+  width: 18px;
+  height: 18px;
+}
+
+.logo.generic svg {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.engine-pick .logo {
+  width: 30px;
+  height: 30px;
+}
+
 
 .preset-name {
   font-size: 13px;
