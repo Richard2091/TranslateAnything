@@ -405,6 +405,10 @@ main::-webkit-scrollbar-thumb:hover {
 :root {
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spring: cubic-bezier(0.32, 1.25, 0.45, 1);
+  /* 展开 / 收起、下拉弹出统一用这一组：高度（或裁切）展开 + 略微下滑 + 淡入 */
+  --fold-time: 0.32s;
+  --fade-time: 0.26s;
+  --fold-out-time: 0.22s;
   interpolate-size: allow-keywords;
 }
 
@@ -437,17 +441,37 @@ main::-webkit-scrollbar-thumb:hover {
   }
 }
 
-/* 打开编辑表单 */
-.pop-in {
-  animation: pop 0.28s var(--ease-out) both;
+/* 可折叠区域：高度平滑展开 / 收起，内容略微下滑淡入（见 ui.ts collapsible） */
+.collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--fold-time) var(--ease-out),
+    opacity var(--fade-time) ease;
 }
 
-@keyframes pop {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.99);
-  }
+.collapse.closed {
+  grid-template-rows: 0fr;
+  opacity: 0;
 }
+
+.collapse > .collapse-inner {
+  min-height: 0;
+}
+
+/* 只在动画过程中裁剪，展开后不挡住输入框的焦点光环 */
+.collapse.moving > .collapse-inner {
+  overflow: hidden;
+}
+
+.collapse > .collapse-inner > * {
+  transition: transform var(--fold-time) var(--ease-out);
+}
+
+.collapse.closed > .collapse-inner > * {
+  transform: translateY(-6px);
+}
+
 
 /* 页首说明：侧栏已标明当前页，不再放大标题；不固定，随内容一起滚走 */
 .page-head {
@@ -576,38 +600,65 @@ button.dropdown.open svg {
   border: 1px solid var(--line-strong);
   box-shadow: var(--shadow-lg);
   outline: none;
-  transform-origin: top center;
-  animation: dd-in 0.18s var(--ease-out);
+  /* 与 .collapse 同一套效果：从触发处向下展开（上方弹出时向上），略微滑动并淡入 */
+  animation: dd-in var(--fold-time) var(--ease-out);
 }
 
 .dd-pop.up {
-  transform-origin: bottom center;
   animation-name: dd-in-up;
 }
 
 .dd-pop.leaving {
   pointer-events: none;
-  animation: dd-out 0.12s ease-in forwards;
+  animation: dd-out var(--fold-out-time) var(--ease-out) forwards;
 }
 
+.dd-pop.up.leaving {
+  animation-name: dd-out-up;
+}
+
+/* 裁切框四周多留 40px，阴影不被切掉 */
 @keyframes dd-in {
   from {
+    clip-path: inset(-40px -40px 100% -40px);
+    translate: 0 -6px;
     opacity: 0;
-    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    clip-path: inset(-40px);
   }
 }
 
 @keyframes dd-in-up {
   from {
+    clip-path: inset(100% -40px -40px -40px);
+    translate: 0 6px;
     opacity: 0;
-    transform: translateY(4px) scale(0.97);
+  }
+  to {
+    clip-path: inset(-40px);
   }
 }
 
 @keyframes dd-out {
+  from {
+    clip-path: inset(-40px);
+  }
   to {
+    clip-path: inset(-40px -40px 100% -40px);
+    translate: 0 -6px;
     opacity: 0;
-    transform: scale(0.98);
+  }
+}
+
+@keyframes dd-out-up {
+  from {
+    clip-path: inset(-40px);
+  }
+  to {
+    clip-path: inset(100% -40px -40px -40px);
+    translate: 0 6px;
+    opacity: 0;
   }
 }
 
@@ -1062,8 +1113,12 @@ button.link-btn:hover svg {
   font-weight: 500;
 }
 
-.engine-params {
+.engine-params,
+.engine-row > .collapse {
   flex-basis: 100%;
+}
+
+.engine-params {
   padding: 0 0 16px 60px;
 }
 
@@ -1952,20 +2007,23 @@ details.pages summary:hover {
   color: var(--accent-text);
 }
 
-/* 展开 / 收起：高度平滑过渡 */
-details.pages::details-content {
+/* 展开 / 收起：与 .collapse 同一套效果（高度平滑展开、内容略微下滑淡入） */
+details::details-content {
   block-size: 0;
   overflow: hidden;
   opacity: 0;
+  translate: 0 -6px;
   transition:
-    block-size 0.28s var(--ease-out),
-    opacity 0.2s ease,
-    content-visibility 0.28s allow-discrete;
+    block-size var(--fold-time) var(--ease-out),
+    translate var(--fold-time) var(--ease-out),
+    opacity var(--fade-time) ease,
+    content-visibility var(--fold-time) allow-discrete;
 }
 
-details.pages[open]::details-content {
+details[open]::details-content {
   block-size: auto;
   opacity: 1;
+  translate: none;
 }
 
 details.pages ul {

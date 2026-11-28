@@ -572,6 +572,44 @@ export function fileSize(bytes: number): string {
   return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
 }
 
+/**
+ * 可折叠区域：高度平滑展开 / 收起（grid 行高 0fr ↔ 1fr，不用量高度），内容略微下滑淡入。
+ * 直接渲染出来的是展开状态；用 expand / collapse 播放动画。
+ */
+export function collapsible(content: HTMLElement): HTMLElement {
+  return h("div", { class: "collapse" }, h("div", { class: "collapse-inner" }, content));
+}
+
+/** 等 grid 行高过渡结束；动画被关掉（时长为 0）时靠兜底计时 */
+function afterRows(el: HTMLElement, fn: () => void) {
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    el.removeEventListener("transitionend", onEnd);
+    fn();
+  };
+  const onEnd = (e: TransitionEvent) => e.target === el && e.propertyName === "grid-template-rows" && finish();
+  el.addEventListener("transitionend", onEnd);
+  window.setTimeout(finish, 450);
+}
+
+/** 从收起展开到内容高度 */
+export function expand(el: HTMLElement) {
+  el.classList.add("closed", "moving");
+  void el.offsetHeight;
+  el.classList.remove("closed");
+  afterRows(el, () => !el.classList.contains("closed") && el.classList.remove("moving"));
+}
+
+/** 收起；收完后调用 done（期间又被展开则不调用） */
+export function collapse(el: HTMLElement, done?: () => void) {
+  el.classList.add("moving");
+  void el.offsetHeight;
+  el.classList.add("closed");
+  afterRows(el, () => el.classList.contains("closed") && done?.());
+}
+
 /** 等退场动画放完再执行 fn（动画关闭时立即执行） */
 export function afterLeave(el: HTMLElement, fn: () => void) {
   const ms = parseFloat(getComputedStyle(el).animationDuration) * 1000 || 0;

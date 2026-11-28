@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { S, cfg, engineInfo, kindOf, refresh, saveConfig, saving, settled, testEngine, type ProviderConfig } from "../state";
 import { t } from "../../i18n";
-import { combo, dropdown, field, fmtSec, h, icon, type DropOption } from "../ui";
+import { collapse, collapsible, combo, dropdown, expand, field, fmtSec, h, icon, type DropOption } from "../ui";
 
 /** 可配置的参数；标签和提示文字取 engines.field.<参数>.label / .ph */
 const FIELDS = new Set(["base_url", "api_key", "region", "model", "concurrency", "proxy"]);
@@ -344,6 +344,33 @@ export function testNote(id: string, style = "margin-top:12px"): HTMLElement | n
   if (r.error) return h("div", { class: "note bad", style }, r.error);
   if (r.result) return h("div", { class: "note ok", style }, `${r.result.source} → ${r.result.text}`);
   return null;
+}
+
+/**
+ * 引擎行的参数区：点 `pick` 展开 / 收起，只动这一行并播放过渡（不重绘整页）；
+ * 重绘时已展开的直接显示，不重播动画。测试结果放在参数区外面，展开与否位置一致。
+ */
+export function wireParams(row: HTMLElement, pick: HTMLElement, id: string, opened: Set<string>, build: () => HTMLElement) {
+  const n = testNote(id, "");
+  const note = n ? h("div", { class: "engine-params" }, n) : null;
+  if (opened.has(id)) row.append(collapsible(build()));
+  if (note) row.append(note);
+  pick.addEventListener("click", () => {
+    const isOpen = !opened.has(id);
+    if (isOpen) opened.add(id);
+    else opened.delete(id);
+    row.classList.toggle("open", isOpen);
+    pick.setAttribute("aria-expanded", String(isOpen));
+    const cur = row.querySelector<HTMLElement>(":scope > .collapse");
+    if (!isOpen) {
+      if (cur) collapse(cur, () => cur.remove());
+      return;
+    }
+    if (cur) return expand(cur); // 正在收起时又点开
+    const wrap = collapsible(build());
+    row.insertBefore(wrap, note);
+    expand(wrap);
+  });
 }
 
 /**
