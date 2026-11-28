@@ -11,9 +11,10 @@
     ocr_lang: "auto",
     engine: "edge",
     fallback: ["bing"],
-    engines: { edge: { base_url: "", api_key: "", region: "", model: "", proxy: null }, openai: { base_url: "https://api.example.com/v1", api_key: "sk-test", region: "", model: "gpt-4o-mini", proxy: null } },
+    engines: { edge: { base_url: "", api_key: "", region: "", model: "", proxy: null }, openai: { base_url: "https://api.example.com/v1", api_key: "sk-test", region: "", model: "gpt-4o-mini", proxy: null, concurrency: 2 } },
     builtin_glossary: true,
     glossary: { New: "新建", Settings: "设置", Projects: "项目" },
+    filter: { keep_terms: ["Claude"], keep_patterns: [], force_translate: [], apps: {} },
     immersive: {
       enabled: true,
       hotkey: "Alt+Shift+T",
@@ -29,8 +30,13 @@
     { port: 39223, name: "Visual Studio Code", enabled: true, state: "no_port", message: "程序正在运行，但没有带调试端口启动。点「以沉浸模式重启」即可。", pages: [], show: false, translated: 0, engine_batches: 0 },
     { port: 39224, name: "Notion", enabled: false, state: "disabled", message: "", pages: [], show: false, translated: 0, engine_batches: 0 },
   ];
-  const words = [["New chat", "新聊天"], ["Search conversations", "搜索对话"], ["Recents", "最近"], ["Start a new project", "开始一个新项目"], ["Upload files", "上传文件"], ["Share", "分享"], ["Copy link", "复制链接"], ["Rename", "重命名"], ["Delete conversation", "删除对话"], ["Model", "模型"], ["Extended thinking", "扩展思考"], ["Add to project", "添加到项目"]];
-  const rows = words.map(([s, t], i) => ({ lang: "zh-CN", source: s, target: t, engine: i % 4 === 0 ? "手工" : "edge", manual: i % 4 === 0, hits: 120 - i * 9, used_at: now - i * 4000 }));
+  const words = [["New chat", "新聊天", "claude.exe", "Claude", false], ["Search conversations", "搜索对话", "claude.exe", "Claude", false], ["Recents", "最近", "claude.exe", "Claude", false], ["Start a new project", "开始一个新项目", "", "", false], ["Upload files", "上传文件", "claude.exe", "Claude", false], ["Claude Sonnet 4", "Claude Sonnet 4", "claude.exe", "Claude", true], ["Copy link", "复制链接", "", "", false], ["Rename", "重命名", "claude.exe", "Claude", false], ["Delete conversation", "删除对话", "claude.exe", "Claude", false], ["Model", "模型", "claude.exe", "Claude", false], ["Extended thinking", "扩展思考", "claude.exe", "Claude", false], ["Add to project", "添加到项目", "", "", false]];
+  const rows = words.map(([s, t, scope, app_name, keep], i) => ({ lang: "zh-CN", scope, app_name, source: s, target: t, engine: i % 4 === 0 ? "手工" : "edge", manual: i % 4 === 0, keep, hits: 120 - i * 9, used_at: now - i * 4000 }));
+  const filterEvents = [
+    { text: "Claude Sonnet 4", decision: "keep", reason: "model_version", app_id: "claude.exe", app_name: "Claude", mode: "immersive", at: now - 30 },
+    { text: "Step 1", decision: "translate", reason: "force_translate", app_id: "claude.exe", app_name: "Claude", mode: "immersive", at: now - 45 },
+    { text: "npm run build", decision: "keep", reason: "code_or_structured", app_id: "code.exe", app_name: "Visual Studio Code", mode: "overlay", at: now - 90 },
+  ];
   const builtin = { Cancel: "取消", Close: "关闭", Copy: "复制", Edit: "编辑", Help: "帮助", OK: "确定", Paste: "粘贴", Save: "保存", Undo: "撤销" };
   const catalog = [
     { id: "edge", name: "微软翻译（免费）", needs_key: false, official: false, fields: ["proxy"], note: "Edge 浏览器内置翻译接口，失败自动回退 Bing 网页版；国内可直连" },
@@ -40,7 +46,7 @@
     { id: "deepl", name: "DeepL（官方 API）", needs_key: true, official: true, fields: ["api_key", "base_url", "proxy"], note: "免费版每月 50 万字符" },
     { id: "deeplx", name: "DeepLX（自建）", needs_key: false, official: false, fields: ["base_url", "api_key", "proxy"], note: "自建 DeepLX 服务地址" },
     { id: "google", name: "Google Cloud 翻译（官方 API）", needs_key: true, official: true, fields: ["api_key", "base_url", "proxy"], note: "需启用 Cloud Translation API；国内需配置代理" },
-    { id: "openai", name: "大模型（OpenAI 兼容）", needs_key: true, official: true, fields: ["base_url", "api_key", "model", "proxy"], note: "任意 OpenAI 兼容服务" },
+    { id: "openai", name: "大模型（OpenAI 兼容）", needs_key: true, official: true, fields: ["base_url", "api_key", "model", "concurrency", "proxy"], note: "任意 OpenAI 兼容服务" },
   ];
   let autostartEnabled = false;
   const handlers = {
@@ -71,8 +77,19 @@
     settings_save: (a) => { Object.assign(config, JSON.parse(JSON.stringify(a.config))); },
     immersive_status: () => statuses,
     immersive_detect: () => [{ name: "Slack", exe: "C:\\Users\\Demo\\AppData\\Local\\slack\\slack.exe", port: null, configured: false }, { name: "Claude", exe: "C:\\...\\claude.exe", port: 39222, configured: true }],
-    store_query: (a) => { const k = (a.keyword || "").toLowerCase(); const r = rows.filter((x) => (!a.manualOnly || x.manual) && (!k || x.source.toLowerCase().includes(k) || x.target.includes(k))); return { total: r.length, rows: r }; },
+    store_apps: () => [
+      { id: "claude.exe", name: "Claude", count: rows.filter((x) => x.scope === "claude.exe").length },
+      { id: "", name: "", count: rows.filter((x) => x.scope === "").length },
+    ],
+    store_query: (a) => {
+      const k = (a.keyword || "").toLowerCase();
+      const r = rows.filter((x) => (a.app === null || a.app === undefined || x.scope === a.app) && (!a.manualOnly || x.manual) && (!k || x.source.toLowerCase().includes(k) || x.target.includes(k)));
+      return { total: r.length, rows: r };
+    },
     store_set: () => null, store_delete: () => null, store_clear: () => 0,
+    filter_events: (a) => filterEvents.filter((e) => (!a.appId || e.app_id === a.appId) && (!a.onlyKept || e.decision === "keep")),
+    filter_override: () => null,
+    engine_cooldowns: () => [],
     immersive_set_show: () => null, immersive_set_enabled: () => null, immersive_launch: () => "已发送",
   };
   let cb = 0;

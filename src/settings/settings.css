@@ -2460,6 +2460,7 @@ input.hotkey-input.recording {
 input.hotkey-input.recording::placeholder {
   color: var(--accent-text);
 }
+
 /* ───── 通栏链路卡片、子页状态横幅、悬停详情浮层与 AI 预设弹窗 ───── */
 .tile-wide {
   grid-column: 1 / -1;
@@ -2760,4 +2761,40 @@ input.hotkey-input.recording::placeholder {
 
 h2.section .spacer {
   flex: 1;
+}
+
+.toolbar select {
+  width: auto;
+  max-width: 220px;
+}
+
+.lib-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.tag.warn {
+  background: var(--warn-soft, rgba(217, 119, 6, 0.14));
+  color: var(--warn, #b45309);
+}
+
+.filter-rules-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 820px) {
+  .filter-rules-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+textarea.rule-box {
+  min-height: 112px;
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+  resize: vertical;
 }

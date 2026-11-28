@@ -5,6 +5,19 @@ import { langLabel, t } from "../i18n";
 
 // ───────────────────────── 类型 ─────────────────────────
 
+export interface FilterRuleSet {
+  keep_terms: string[];
+  keep_patterns: string[];
+  force_translate: string[];
+}
+
+export interface FilterConfig {
+  keep_terms: string[];
+  keep_patterns: string[];
+  force_translate: string[];
+  apps: Record<string, FilterRuleSet>;
+}
+
 export interface ImmersiveTarget {
   name: string;
   enabled: boolean;
@@ -14,6 +27,7 @@ export interface ImmersiveTarget {
   url_prefixes: string[];
   skip_selectors: string[];
   auto_relaunch: boolean;
+  filter?: FilterRuleSet;
 }
 
 export interface ProviderConfig {
@@ -24,6 +38,7 @@ export interface ProviderConfig {
   region: string;
   model: string;
   proxy: string | null;
+  concurrency?: number | null;
 }
 
 export interface Config {
@@ -43,6 +58,7 @@ export interface Config {
   persist_cache: boolean;
   builtin_glossary: boolean;
   glossary: Record<string, string>;
+  filter: FilterConfig;
   immersive: { enabled: boolean; hotkey: string; targets: ImmersiveTarget[] };
   /** 界面语言；空或缺省表示跟随系统 */
   ui_lang?: string;
@@ -106,6 +122,22 @@ export interface StoreStats {
   total: number;
   manual: number;
   hits: number;
+}
+
+export interface StoreAppSummary {
+  id: string;
+  name: string;
+  count: number;
+}
+
+export interface FilterEvent {
+  text: string;
+  decision: string;
+  reason: string;
+  app_id: string;
+  app_name: string;
+  mode: "overlay" | "immersive";
+  at: number;
 }
 
 export interface EngineTest {

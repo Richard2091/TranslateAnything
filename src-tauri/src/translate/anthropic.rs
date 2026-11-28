@@ -1,7 +1,8 @@
 //! Anthropic Messages 原生协议：POST `{base_url}/v1/messages`
 
+use super::limiter;
 use super::llm::{self, LlmChat};
-use super::{TranslateError, Translator, build_client, parse_err, require_key, send_json};
+use super::{BatchContext, TranslateError, TranslateItem, TranslatedItem, Translator, build_client, parse_err, require_key, send_json};
 use crate::config::ProviderConfig;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -10,6 +11,8 @@ pub const DEFAULT_BASE: &str = "https://api.anthropic.com";
 const API_VERSION: &str = "2023-06-01";
 
 pub struct Anthropic {
+    engine_id: String,
+    concurrency: usize,
     client: reqwest::Client,
     url: String,
     api_key: String,
@@ -17,12 +20,19 @@ pub struct Anthropic {
 }
 
 impl Anthropic {
+    #[allow(dead_code)]
     pub fn new(cfg: &ProviderConfig) -> Result<Self, TranslateError> {
+        Self::new_with_id("anthropic", cfg)
+    }
+
+    pub fn new_with_id(id: &str, cfg: &ProviderConfig) -> Result<Self, TranslateError> {
         let api_key = require_key(cfg, "Anthropic API key")?;
         if cfg.model.trim().is_empty() {
             return Err(TranslateError::Config(t!("err.engine.no_model")));
         }
         Ok(Self {
+            engine_id: id.to_string(),
+            concurrency: cfg.effective_concurrency("anthropic"),
             client: build_client(cfg)?,
             url: messages_url(&cfg.base_url),
             api_key,
@@ -89,21 +99,25 @@ fn extract_content(v: &Value) -> Result<String, TranslateError> {
 #[async_trait]
 impl LlmChat for Anthropic {
     async fn chat(&self, system: &str, user: &str, max_tokens: u32) -> Result<String, TranslateError> {
-        let req = self
-            .client
-            .post(&self.url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .json(&json!({
-                "model": self.model,
-                "max_tokens": max_tokens,
-                "temperature": 0.2,
-                "system": system,
-                "messages": [
-                    { "role": "user", "content": user },
-                ],
-            }));
-        let v = send_json(req, "/error/message").await.map_err(|e| llm::auth_hint(e, &self.url, &self.api_key))?;
+        let v = limiter::run_limited(&self.engine_id, self.concurrency, || {
+            let req = self
+                .client
+                .post(&self.url)
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", API_VERSION)
+                .json(&json!({
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.2,
+                    "system": system,
+                    "messages": [
+                        { "role": "user", "content": user },
+                    ],
+                }));
+            async move { send_json(req, "/error/message").await }
+        })
+        .await
+        .map_err(|e| llm::auth_hint(e, &self.url, &self.api_key))?;
         extract_content(&v)
     }
 }
@@ -134,6 +148,16 @@ impl Translator for Anthropic {
 
     async fn translate_batch(&self, texts: &[String], target_lang: &str) -> Result<Vec<String>, TranslateError> {
         llm::translate_batch(self, texts, target_lang).await
+    }
+
+    async fn translate_items(
+        &self,
+        items: &[TranslateItem],
+        ctx: &BatchContext,
+        keep_terms: &[String],
+        target_lang: &str,
+    ) -> Result<Vec<TranslatedItem>, TranslateError> {
+        llm::translate_items(self, items, ctx, keep_terms, target_lang).await
     }
 }
 

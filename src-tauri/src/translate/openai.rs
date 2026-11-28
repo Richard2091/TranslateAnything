@@ -1,12 +1,15 @@
 //! OpenAI 兼容协议：POST `{base_url}/chat/completions`
 
+use super::limiter;
 use super::llm::{self, LlmChat};
-use super::{TranslateError, Translator, build_client, parse_err, send_json};
+use super::{BatchContext, TranslateError, TranslateItem, TranslatedItem, Translator, build_client, parse_err, send_json};
 use crate::config::ProviderConfig;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 pub struct OpenAICompatible {
+    engine_id: String,
+    concurrency: usize,
     client: reqwest::Client,
     url: String,
     api_key: String,
@@ -14,7 +17,12 @@ pub struct OpenAICompatible {
 }
 
 impl OpenAICompatible {
+    #[allow(dead_code)]
     pub fn new(cfg: &ProviderConfig) -> Result<Self, TranslateError> {
+        Self::new_with_id("openai", cfg)
+    }
+
+    pub fn new_with_id(id: &str, cfg: &ProviderConfig) -> Result<Self, TranslateError> {
         let base = cfg.base_url.trim().trim_end_matches('/');
         if base.is_empty() {
             return Err(TranslateError::Config(t!("err.engine.no_base_url")));
@@ -23,6 +31,8 @@ impl OpenAICompatible {
             return Err(TranslateError::Config(t!("err.engine.no_model")));
         }
         Ok(Self {
+            engine_id: id.to_string(),
+            concurrency: cfg.effective_concurrency("openai"),
             client: build_client(cfg)?,
             url: chat_url(base),
             api_key: cfg.api_key.trim().to_string(),
@@ -34,19 +44,23 @@ impl OpenAICompatible {
 #[async_trait]
 impl LlmChat for OpenAICompatible {
     async fn chat(&self, system: &str, user: &str, _max_tokens: u32) -> Result<String, TranslateError> {
-        let mut req = self.client.post(&self.url).json(&json!({
-            "model": self.model,
-            "temperature": 0.2,
-            "stream": false,
-            "messages": [
-                { "role": "system", "content": system },
-                { "role": "user", "content": user },
-            ],
-        }));
-        if !self.api_key.is_empty() {
-            req = req.bearer_auth(&self.api_key);
-        }
-        let v = send_json(req, "/error/message").await.map_err(|e| llm::auth_hint(e, &self.url, &self.api_key))?;
+        let v = limiter::run_limited(&self.engine_id, self.concurrency, || {
+            let mut req = self.client.post(&self.url).json(&json!({
+                "model": self.model,
+                "temperature": 0.2,
+                "stream": false,
+                "messages": [
+                    { "role": "system", "content": system },
+                    { "role": "user", "content": user },
+                ],
+            }));
+            if !self.api_key.is_empty() {
+                req = req.bearer_auth(&self.api_key);
+            }
+            async move { send_json(req, "/error/message").await }
+        })
+        .await
+        .map_err(|e| llm::auth_hint(e, &self.url, &self.api_key))?;
         let msg = v.pointer("/choices/0/message").ok_or_else(|| parse_err(&v))?;
         let content = msg.get("content").and_then(Value::as_str).map(llm::strip_think).unwrap_or_default();
         if content.is_empty() {
@@ -107,6 +121,16 @@ impl Translator for OpenAICompatible {
 
     async fn translate_batch(&self, texts: &[String], target_lang: &str) -> Result<Vec<String>, TranslateError> {
         llm::translate_batch(self, texts, target_lang).await
+    }
+
+    async fn translate_items(
+        &self,
+        items: &[TranslateItem],
+        ctx: &BatchContext,
+        keep_terms: &[String],
+        target_lang: &str,
+    ) -> Result<Vec<TranslatedItem>, TranslateError> {
+        llm::translate_items(self, items, ctx, keep_terms, target_lang).await
     }
 }
 

@@ -288,7 +288,7 @@ function aiRow(id: string, chain: string[]): HTMLElement {
     );
 
     const extra = [field(t("engines.field.name.label"), nameInput), field(t("engines.field.protocol.label"), protoDrop)];
-    row.append(h("div", { class: "engine-params pop-in" }, paramFields(id, ["base_url", "api_key", "model", "proxy"], true, extra), testNote(id)));
+    row.append(h("div", { class: "engine-params pop-in" }, paramFields(id, ["base_url", "api_key", "model", "concurrency", "proxy"], true, extra), testNote(id)));
   } else {
     const n = testNote(id, "");
     if (n) row.append(h("div", { class: "engine-params" }, n));
