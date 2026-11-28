@@ -1,7 +1,7 @@
 // 常规：界面语言、目标语言、网络代理、译文库开关、文件位置（显示大小，译文库可搬家）、版本与更新
 import { invoke } from "@tauri-apps/api/core";
 import { S, cfg, langs, loadStats, loadView, refresh, saveConfig, type UpdateInfo } from "../state";
-import { confirmDialog, dropdown, errText, fileSize, h, icon, pageHead, section, switchEl, toast, type IconName } from "../ui";
+import { combo, confirmDialog, dropdown, errText, fileSize, h, icon, pageHead, section, switchEl, toast, type IconName } from "../ui";
 import { t, uiLocales } from "../../i18n";
 import { proxyField } from "./engineShared";
 
@@ -82,6 +82,43 @@ async function installUpdate() {
   }
 }
 
+/** 选了“自定义镜像”但还没填地址时，保持显示输入框 */
+let customChannel = false;
+
+/** 更新通道：自动 / 官方 / 内置镜像 / 自定义镜像前缀 */
+function channelField(value: string, mirrors: string[]): HTMLElement {
+  const v = value.trim();
+  const host = (m: string) => m.replace(/^https:\/\//, "").replace(/\/$/, "");
+  const builtin = v === "" || v === "auto" || v === "github" || mirrors.includes(v);
+  const mode = customChannel || !builtin ? "custom" : v === "auto" ? "" : v;
+  const save = (ch: string) => saveConfig((x) => (x.update = { ...x.update, channel: ch }));
+  const pick = dropdown(
+    [
+      { value: "", label: t("general.update.channelAuto") },
+      { value: "github", label: t("general.update.channelGithub"), hint: "github.com" },
+      ...mirrors.map((m) => ({ value: m, label: host(m), hint: t("general.update.channelMirror") })),
+      { value: "custom", label: t("general.update.channelCustom") },
+    ],
+    mode,
+    (m) => {
+      customChannel = m === "custom";
+      if (customChannel) refresh();
+      else save(m);
+    },
+    { width: "100%" },
+  );
+  if (mode !== "custom") return pick;
+  const addr = combo(
+    builtin ? "" : v,
+    (a) => {
+      if (a) customChannel = false;
+      save(a);
+    },
+    { key: "update-channel", placeholder: t("general.update.channelCustomPh") },
+  );
+  return h("div", { class: "proxy-field" }, pick, addr);
+}
+
 /** 版本与更新卡片 */
 function updateCard(row: (label: string, desc: string, control: HTMLElement, auto?: boolean) => HTMLElement): HTMLElement {
   const c = cfg();
@@ -104,9 +141,10 @@ function updateCard(row: (label: string, desc: string, control: HTMLElement, aut
 
   const actions: HTMLElement[] = [];
   if (info?.newer && !u.installing) {
-    const portable = !!v?.portable || !info.asset_name;
+    // 没有匹配本机的安装包时只能打开下载页；安装版和便携版都能就地更新
+    const pageOnly = !info.asset_name;
     actions.push(
-      h("button", { class: "btn sm primary", onclick: installUpdate }, portable ? t("general.update.openPage") : t("general.update.install")),
+      h("button", { class: "btn sm primary", onclick: installUpdate }, pageOnly ? t("general.update.openPage") : t("general.update.install")),
       skipped
         ? h("span")
         : h("button", {
@@ -116,7 +154,7 @@ function updateCard(row: (label: string, desc: string, control: HTMLElement, aut
     );
   }
   actions.push(
-    h("button", { class: "btn ghost sm", disabled: u.checking || u.installing, onclick: checkUpdate },
+    h("button", { class: "btn sm", disabled: u.checking || u.installing, onclick: checkUpdate },
       u.checking ? t("general.update.checking") : t("general.update.check")),
   );
 
@@ -130,6 +168,11 @@ function updateCard(row: (label: string, desc: string, control: HTMLElement, aut
       true,
     ),
     u.error ? h("div", { class: "note bad", style: "margin:0 16px 12px" }, u.error) : h("span"),
+    row(
+      t("general.update.channel"),
+      info?.via ? `${t("general.update.channelDesc")} ${t("general.update.channelVia", { via: info.via })}` : t("general.update.channelDesc"),
+      channelField(c.update?.channel ?? "", v?.mirrors ?? []),
+    ),
     row(
       t("general.update.auto"),
       t("general.update.autoDesc"),

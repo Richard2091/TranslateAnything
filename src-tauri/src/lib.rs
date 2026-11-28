@@ -35,7 +35,13 @@ static IMMERSIVE_HOTKEY: OnceLock<Shortcut> = OnceLock::new();
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 在注册快捷键、创建托盘或读取用户配置之前拦截重复启动。
-    let instance = match single_instance::acquire() {
+    // 便携版更新后由旧进程拉起：旧进程正在退出，多等一会儿单实例锁
+    let acquired = if std::env::args().any(|a| a == update::AFTER_UPDATE_ARG) {
+        single_instance::acquire_wait(15_000)
+    } else {
+        single_instance::acquire()
+    };
+    let instance = match acquired {
         Ok(Some(instance)) => instance,
         Ok(None) => return,
         Err(e) => {

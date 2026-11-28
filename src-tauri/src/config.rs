@@ -69,11 +69,15 @@ pub struct UpdateConfig {
     /// 用户选择跳过的版本号（如 `0.3.0`），该版本不再提示
     #[serde(skip_serializing_if = "String::is_empty")]
     pub skip_version: String,
+    /// 更新通道：空或 `auto` 同时试官方和内置镜像、用最快的；`github` 只用官方；
+    /// 其他为镜像前缀（如 `https://gh-proxy.com/`），只用该镜像。见 `update::BUILTIN_MIRRORS`
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub channel: String,
 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
-        Self { auto_check: true, skip_version: String::new() }
+        Self { auto_check: true, skip_version: String::new(), channel: String::new() }
     }
 }
 

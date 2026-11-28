@@ -64,7 +64,7 @@ export interface Config {
   immersive: { enabled: boolean; hotkey: string; targets: ImmersiveTarget[] };
   /** 界面语言；空或缺省表示跟随系统 */
   ui_lang?: string;
-  update: { auto_check: boolean; skip_version?: string };
+  update: { auto_check: boolean; skip_version?: string; channel?: string };
   [key: string]: unknown;
 }
 
@@ -108,6 +108,7 @@ export interface AppVersion {
   arch: string;
   portable: boolean;
   repo: string;
+  mirrors: string[];
 }
 
 export interface UpdateInfo {
@@ -118,6 +119,7 @@ export interface UpdateInfo {
   published_at: string;
   asset_name: string | null;
   asset_size: number;
+  via: string;
 }
 
 export interface StoreStats {
