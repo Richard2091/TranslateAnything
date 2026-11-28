@@ -101,6 +101,10 @@ pub struct ProviderConfig {
     /// 最大并发请求数（留空按引擎类型默认：AI 引擎 2，传统引擎 4）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub concurrency: Option<u8>,
+    /// 设置界面显示的图标（AI 翻译供应商用）：留空 = 自动（按接口地址匹配内置 logo，匹配不到取网站图标）；
+    /// `preset:<id>` = 指定内置 logo；`none` = 通用图标；`data:image/...` = 用户上传的图片（已缩到 64px）
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 /// 翻译过滤规则集（不翻译词表 / 正则 / 强制翻译）

@@ -39,6 +39,8 @@ export interface ProviderConfig {
   model: string;
   proxy: string | null;
   concurrency?: number | null;
+  /** 图标：留空 = 自动；preset:<id> = 内置 logo；none = 通用图标；data:image/... = 上传的图片（见 logos/index.ts） */
+  icon?: string;
 }
 
 export interface Config {

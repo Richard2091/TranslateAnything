@@ -16,6 +16,7 @@ mod motion;
 mod ocr;
 mod settings;
 mod single_instance;
+mod site_icon;
 mod store;
 mod translate;
 mod tray;
@@ -144,6 +145,8 @@ pub fn run() {
             settings::engine_test_chain,
             settings::engine_cooldowns,
             settings::llm_models,
+            settings::provider_site_icon,
+            settings::site_icon_prune,
             settings::pick_exe,
             settings::overlay_start,
             settings::ocr_languages,

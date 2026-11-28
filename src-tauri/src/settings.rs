@@ -340,6 +340,22 @@ pub async fn llm_models(id: String) -> Result<Vec<String>, String> {
     translate::list_models(&kind, &provider).await
 }
 
+/// AI 供应商的网站图标（按已保存的接口地址和代理取，带磁盘缓存，见 `site_icon`）
+#[tauri::command]
+pub async fn provider_site_icon(id: String) -> Result<Option<crate::site_icon::SiteIcon>, String> {
+    let cfg = config::load()?;
+    let provider = cfg.provider(&id);
+    let proxy = provider.proxy.clone().unwrap_or_default();
+    Ok(crate::site_icon::fetch(&provider.base_url, &proxy).await)
+}
+
+/// 清理不再被任何引擎使用的网站图标缓存（删除供应商、改接口地址后调用）
+#[tauri::command]
+pub fn site_icon_prune() -> Result<(), String> {
+    crate::site_icon::prune(&config::load()?);
+    Ok(())
+}
+
 /// 按当前生效调用链逐节点测速，并通过事件向设置窗口推送每步状态
 #[tauri::command]
 pub async fn engine_test_chain(app: AppHandle, run_id: String) -> Result<Vec<translate::ChainTestStep>, String> {
