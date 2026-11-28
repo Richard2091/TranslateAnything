@@ -2,7 +2,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { StoreAppSummary, cfg, loadStats, providerLabel } from "../state";
 import { fmtNum, t } from "../../i18n";
-import { confirmDialog, emptyState, errText, h, icon, pageHead, relTime, toast } from "../ui";
+import { collapse, collapsible, confirmDialog, emptyState, errText, expand, h, icon, pageHead, searchSelect, segmented, toast, type DropOption } from "../ui";
+
+interface AppRef {
+  id: string;
+  name: string;
+}
 
 interface Entry {
   lang: string;
@@ -13,16 +18,21 @@ interface Entry {
   engine: string;
   manual: boolean;
   keep: boolean;
-  hits: number;
-  used_at: number;
+  /** 归属的软件：按应用隔离的是所在软件，共享长句是用过它的所有软件 */
+  apps: AppRef[];
 }
 
 const PAGE_SIZE = 50;
 const ALL_APPS = "__all__";
 
+type SourceFilter = "all" | "manual" | "auto";
+type KeepFilter = "all" | "only" | "exclude";
+
 const lib = {
   keyword: "",
-  manualOnly: false,
+  /** 更多筛选：来源、保留原文 */
+  source: "all" as SourceFilter,
+  keep: "all" as KeepFilter,
   app: null as string | null,
   apps: [] as StoreAppSummary[],
   offset: 0,
@@ -45,19 +55,34 @@ export function buildLibrary(root: HTMLElement) {
     }, 180);
   });
 
-  const appSelect = h("select", { id: "lib-app-select", class: "lib-app" });
-  appSelect.addEventListener("change", () => {
-    lib.app = appSelect.value === ALL_APPS ? null : appSelect.value;
-    lib.offset = 0;
-    queryLibrary();
-  });
-
-  const manual = h("input", { type: "checkbox", checked: lib.manualOnly });
-  manual.addEventListener("change", () => {
-    lib.manualOnly = manual.checked;
-    lib.offset = 0;
-    queryLibrary();
-  });
+  // 更多筛选：按钮在工具栏里，面板在工具栏下方，用统一的展开 / 收起效果
+  const filterSlot = h("div", { class: "lib-filter-slot" });
+  const filterBtn = h(
+    "button",
+    {
+      type: "button",
+      class: "btn ghost lib-filter-btn",
+      "aria-expanded": "false",
+      onclick: () => {
+        filtersOpen = !filtersOpen;
+        filterBtn.classList.toggle("open", filtersOpen);
+        filterBtn.setAttribute("aria-expanded", String(filtersOpen));
+        const cur = filterSlot.querySelector<HTMLElement>(":scope > .collapse");
+        if (!filtersOpen) {
+          if (cur) collapse(cur, () => cur.remove());
+          return;
+        }
+        if (cur) return expand(cur);
+        const wrap = collapsible(filterPanel());
+        filterSlot.append(wrap);
+        expand(wrap);
+      },
+    },
+    icon("sliders"),
+    t("library.moreFilters"),
+    h("span", { class: "filter-count", id: "lib-filter-count" }),
+    icon("down"),
+  );
 
   root.replaceChildren(
     pageHead(t("library.lead")),
@@ -68,15 +93,82 @@ export function buildLibrary(root: HTMLElement) {
         "div",
         { class: "toolbar" },
         h("div", { class: "grow search" }, icon("search"), search),
-        appSelect,
-        h("label", { class: "check" }, manual, t("library.manualOnly")),
+        h("span", { id: "lib-app-slot" }),
+        filterBtn,
         h("button", { class: "btn ghost danger", onclick: clearLibrary }, icon("trash"), t("library.clearEllipsis")),
       ),
+      filterSlot,
       h("div", { id: "lib-table" }),
     ),
   );
+  syncFilterBtn();
   renderAppSelect();
   built = true;
+}
+
+let filtersOpen = false;
+
+/** 生效中的更多筛选条件数，显示在按钮上 */
+function syncFilterBtn() {
+  const n = Number(lib.source !== "all") + Number(lib.keep !== "all");
+  const badge = document.getElementById("lib-filter-count");
+  if (!badge) return;
+  badge.textContent = n ? String(n) : "";
+  badge.hidden = !n;
+}
+
+function filterPanel(): HTMLElement {
+  const apply = () => {
+    lib.offset = 0;
+    syncFilterBtn();
+    queryLibrary();
+  };
+  const row = (label: string, control: HTMLElement) => h("div", { class: "lib-filter-row" }, h("span", { class: "lib-filter-label" }, label), control);
+  const panel = h("div", { class: "lib-filters" });
+  const fill = () =>
+    panel.replaceChildren(
+      row(
+        t("library.filter.source"),
+        segmented<SourceFilter>(
+          [
+            ["all", t("library.filter.all")],
+            ["manual", t("library.filter.manual")],
+            ["auto", t("library.filter.auto")],
+          ],
+          lib.source,
+          (v) => ((lib.source = v), apply()),
+        ),
+      ),
+      row(
+        t("library.filter.keep"),
+        segmented<KeepFilter>(
+          [
+            ["all", t("library.filter.all")],
+            ["only", t("library.filter.keepOnly")],
+            ["exclude", t("library.filter.keepExclude")],
+          ],
+          lib.keep,
+          (v) => ((lib.keep = v), apply()),
+        ),
+      ),
+      h(
+        "button",
+        {
+          type: "button",
+          class: "link lib-filter-reset",
+          onclick: () => {
+            if (lib.source === "all" && lib.keep === "all") return;
+            lib.source = "all";
+            lib.keep = "all";
+            fill();
+            apply();
+          },
+        },
+        t("library.filter.reset"),
+      ),
+    );
+  fill();
+  return panel;
 }
 
 function appLabel(a: StoreAppSummary): string {
@@ -84,15 +176,50 @@ function appLabel(a: StoreAppSummary): string {
   return `${base} (${fmtNum(a.count)})`;
 }
 
+/** 上次渲染的软件下拉内容；没变就不重建，免得每次查询都换掉按钮 */
+let appSelectSig = "";
+
+/** 沉浸模式里配置过的程序路径，按程序名（小写）索引；译文库只存程序名，路径从这里补来参与搜索 */
+function exePaths(): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const tg of cfg().immersive.targets) {
+    const exe = tg.exe.trim();
+    const base = (exe.split(/[\\/]/).pop() ?? "").toLowerCase();
+    if (base && exe !== base) m.set(base, exe);
+  }
+  return m;
+}
+
 function renderAppSelect() {
-  const select = document.getElementById("lib-app-select") as HTMLSelectElement | null;
-  if (!select) return;
-  const opts = [
-    h("option", { value: ALL_APPS }, t("library.appAll")),
-    ...lib.apps.map((a) => h("option", { value: a.id }, appLabel(a))),
+  const slot = document.getElementById("lib-app-slot");
+  if (!slot) return;
+  const paths = exePaths();
+  const options: DropOption<string>[] = [
+    ...lib.apps.map((a) => ({
+      value: a.id,
+      label: appLabel(a),
+      // 显示名和程序名不同时把程序名作为小字提示
+      hint: a.id && a.name && a.name.toLowerCase() !== a.id.toLowerCase() ? a.id : undefined,
+      keywords: paths.get(a.id.toLowerCase()),
+    })),
   ];
-  select.replaceChildren(...opts);
-  select.value = lib.app === null ? ALL_APPS : lib.app;
+  const value = lib.app === null ? ALL_APPS : lib.app;
+  const sig = JSON.stringify([value, options]);
+  // 没变化，或正在里面输入时不重建（免得打断）
+  if ((sig === appSelectSig && slot.firstChild) || slot.contains(document.activeElement)) return;
+  appSelectSig = sig;
+  slot.replaceChildren(
+    searchSelect(
+      options,
+      value,
+      (v) => {
+        lib.app = v === ALL_APPS ? null : v;
+        lib.offset = 0;
+        queryLibrary();
+      },
+      { placeholder: t("library.appSearch"), width: "220px", empty: ALL_APPS },
+    ),
+  );
 }
 
 export async function queryLibrary() {
@@ -107,7 +234,8 @@ export async function queryLibrary() {
 
     const page = await invoke<{ total: number; rows: Entry[] }>("store_query", {
       keyword: lib.keyword,
-      manualOnly: lib.manualOnly,
+      manual: lib.source === "all" ? null : lib.source === "manual",
+      keep: lib.keep === "all" ? null : lib.keep === "only",
       app: lib.app,
       offset: lib.offset,
       limit: PAGE_SIZE,
@@ -120,11 +248,59 @@ export async function queryLibrary() {
   }
 }
 
+/** 软件名的首字（跳过空白和括号里的补充说明） */
+function initial(name: string): string {
+  const s = name.replace(/[（(].*$/, "").trim() || name.trim();
+  return [...s][0]?.toUpperCase() ?? "?";
+}
+
+/** 按程序名算一个稳定的色相，同一软件每次颜色一样 */
+function hueOf(id: string): number {
+  let n = 0;
+  for (const ch of id) n = (n * 31 + ch.charCodeAt(0)) >>> 0;
+  return n % 360;
+}
+
+const MAX_APPS = 3;
+
+/**
+ * “软件”列：每个软件一个首字图标 + 名称；列窄时只显示图标（见 CSS 容器查询）。
+ * 共享长句可能被多个软件用过，最多列 3 个，其余折成 +N。点一下按这个软件筛选。
+ */
+function appCell(apps: AppRef[]): HTMLElement {
+  if (!apps.length) return h("span", { class: "lib-app-none", title: t("library.appUnclassified") }, "—");
+  const chip = (a: AppRef) => {
+    const name = a.name || a.id;
+    return h(
+      "button",
+      {
+        type: "button",
+        class: "lib-app-chip",
+        title: name === a.id ? name : `${name}\n${a.id}`,
+        onclick: () => {
+          lib.app = a.id;
+          lib.offset = 0;
+          queryLibrary();
+        },
+      },
+      h("span", { class: "app-avatar", style: `--h:${hueOf(a.id)}` }, initial(name)),
+      h("span", { class: "lib-app-name" }, name),
+    );
+  };
+  const rest = apps.length - MAX_APPS;
+  return h(
+    "div",
+    { class: "lib-apps" },
+    ...apps.slice(0, rest > 0 ? MAX_APPS - 1 : MAX_APPS).map(chip),
+    rest > 0 && h("span", { class: "lib-app-more", title: apps.slice(MAX_APPS - 1).map((a) => a.name || a.id).join("\n") }, `+${rest + 1}`),
+  );
+}
+
 function renderTable() {
   const box = document.getElementById("lib-table");
   if (!box) return;
   if (lib.rows.length === 0) {
-    const hasFilter = Boolean(lib.keyword || lib.manualOnly || lib.app !== null);
+    const hasFilter = Boolean(lib.keyword || lib.app !== null || lib.source !== "all" || lib.keep !== "all");
     box.replaceChildren(emptyState(hasFilter ? t("library.noMatch") : t("library.empty"), lib.keyword ? "search" : "box"));
     return;
   }
@@ -158,22 +334,20 @@ function renderTable() {
       }
     });
 
-    const tags = h("div", { class: "lib-tags" });
-    if (r.scope !== "") tags.append(h("span", { class: "tag" }, r.app_name || r.scope));
-    if (r.keep) tags.append(h("span", { class: "tag warn" }, t("library.keepTag")));
-
     tbody.append(
       h(
         "tr",
         { class: r.manual ? "manual" : "" },
-        h("td", { class: "src-text" }, r.source, tags.childNodes.length > 0 && tags),
+        h("td", {}, appCell(r.apps)),
+        h("td", { class: "src-text" }, r.source, r.keep && h("div", { class: "lib-tags" }, h("span", { class: "tag warn" }, t("library.keepTag")))),
         h("td", {}, input),
-        h("td", {}, h("span", { class: `tag${r.manual ? " accent" : ""}` }, r.manual ? t("library.manual") : providerLabel(cfg(), r.engine))),
-        h("td", { class: "small muted num" }, fmtNum(r.hits)),
-        h("td", { class: "small muted" }, relTime(r.used_at)),
+        (() => {
+          const label = r.manual ? t("library.manual") : providerLabel(cfg(), r.engine);
+          return h("td", {}, h("span", { class: `tag lib-engine${r.manual ? " accent" : ""}`, title: label }, label));
+        })(),
         h(
           "td",
-          {},
+          { class: "lib-del-col" },
           h(
             "button",
             {
@@ -209,12 +383,11 @@ function renderTable() {
         h(
           "tr",
           {},
-          h("th", { style: "width:36%" }, t("library.col.source")),
+          h("th", { class: "lib-app-col" }, t("library.col.app")),
+          h("th", { style: "width:34%" }, t("library.col.source")),
           h("th", {}, t("library.col.target")),
-          h("th", { style: "width:92px" }, t("library.col.engine")),
-          h("th", { style: "width:60px" }, t("library.col.hits")),
-          h("th", { style: "width:92px" }, t("library.col.used")),
-          h("th", { style: "width:52px" }, ""),
+          h("th", { class: "lib-engine-col" }, t("library.col.engine")),
+          h("th", { class: "lib-del-col" }, ""),
         ),
       ),
       tbody,

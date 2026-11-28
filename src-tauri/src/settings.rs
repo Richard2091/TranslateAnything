@@ -182,13 +182,15 @@ pub fn store_apps() -> Result<Vec<store::AppSummary>, String> {
 #[tauri::command]
 pub fn store_query(
     keyword: String,
-    manual_only: bool,
+    manual: Option<bool>,
+    keep: Option<bool>,
     app: Option<String>,
     offset: i64,
     limit: i64,
 ) -> Result<store::Page, String> {
     let lang = config::load()?.target_lang;
-    store::query(&lang, &keyword, manual_only, app.as_deref(), offset, limit.clamp(1, 500))
+    let filter = store::Filter { keyword: &keyword, manual, keep, app: app.as_deref() };
+    store::query(&lang, &filter, offset, limit.clamp(1, 500))
 }
 
 /// 改译：写成手工译文，并推送到已接管的页面立即生效

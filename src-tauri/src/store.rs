@@ -439,6 +439,15 @@ pub struct Entry {
     pub keep: bool,
     pub hits: i64,
     pub used_at: i64,
+    /// 归属的软件（见 entry_apps）
+    pub apps: Vec<AppRef>,
+}
+
+/// 译文条目归属的软件
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AppRef {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -497,28 +506,30 @@ fn list_apps_in(c: &Connection, lang: &str) -> rusqlite::Result<Vec<AppSummary>>
 }
 
 /// 分页查询：支持按软件筛选（`None` 全部，`Some("")` 未分类，`Some(app_id)` 指定软件）
-pub fn query(
-    lang: &str,
-    keyword: &str,
-    manual_only: bool,
-    app_filter: Option<&str>,
-    offset: i64,
-    limit: i64,
-) -> Result<Page, String> {
-    with_conn(|c| query_in(c, lang, keyword, manual_only, app_filter, offset, limit))
+/// 译文库列表的筛选条件；`None` 表示不限
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Filter<'a> {
+    pub keyword: &'a str,
+    /// `Some(true)` 只看手工译文，`Some(false)` 只看自动翻译
+    pub manual: Option<bool>,
+    /// `Some(true)` 只看保留原文，`Some(false)` 排除保留原文
+    pub keep: Option<bool>,
+    /// 按软件筛选；`Some("")` 为未分类
+    pub app: Option<&'a str>,
 }
 
-fn query_in(
-    c: &Connection,
-    lang: &str,
-    keyword: &str,
-    manual_only: bool,
-    app_filter: Option<&str>,
-    offset: i64,
-    limit: i64,
-) -> rusqlite::Result<Page> {
-    let kw = format!("%{}%", keyword.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
-    let norm_app = app_filter.map(normalize_app_id);
+/// 三态条件转成 SQL 参数：-1 不限，0 / 1 对应取值
+fn tri(v: Option<bool>) -> i64 {
+    v.map_or(-1, i64::from)
+}
+
+pub fn query(lang: &str, filter: &Filter, offset: i64, limit: i64) -> Result<Page, String> {
+    with_conn(|c| query_in(c, lang, filter, offset, limit))
+}
+
+fn query_in(c: &Connection, lang: &str, f: &Filter, offset: i64, limit: i64) -> rusqlite::Result<Page> {
+    let kw = format!("%{}%", f.keyword.trim().replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_"));
+    let norm_app = f.app.map(normalize_app_id);
     let app_clause = match norm_app.as_deref() {
         None => "?4 = ?4",
         Some("") => {
@@ -529,30 +540,39 @@ fn query_in(
         }
     };
     let filter = format!(
-        "t.lang = ?1 AND (t.source LIKE ?2 ESCAPE '\\' OR t.target LIKE ?2 ESCAPE '\\') AND (?3 = 0 OR t.manual = 1) AND {app_clause}"
+        "t.lang = ?1 AND (t.source LIKE ?2 ESCAPE '\\' OR t.target LIKE ?2 ESCAPE '\\') AND (?3 = -1 OR t.manual = ?3) AND {app_clause} AND (?5 = -1 OR t.keep = ?5)"
     );
     let app_param = norm_app.unwrap_or_default();
+    let (manual, keep) = (tri(f.manual), tri(f.keep));
 
     let total: i64 = c.query_row(
         &format!("SELECT COUNT(*) FROM translations t WHERE {filter}"),
-        params![lang, kw, manual_only as i64, app_param],
+        params![lang, kw, manual, app_param, keep],
         |r| r.get(0),
     )?;
+    // linked：共享长句被哪些软件用过，拼成 "id\x1fname\x1eid\x1fname…"，下面再拆开
     let mut stmt = c.prepare(&format!(
         "SELECT t.lang, t.scope, COALESCE(NULLIF(ap.name, ''), t.scope) AS app_name,
-                t.source, t.target, t.engine, t.manual, t.keep, t.hits, t.used_at
+                t.source, t.target, t.engine, t.manual, t.keep, t.hits, t.used_at,
+                (SELECT group_concat(ta.app_id || char(31) || COALESCE(NULLIF(a2.name, ''), ta.app_id), char(30))
+                 FROM translation_apps ta LEFT JOIN apps a2 ON a2.app_id = ta.app_id
+                 WHERE ta.lang = t.lang AND ta.scope = t.scope AND ta.source = t.source) AS linked
          FROM translations t
          LEFT JOIN apps ap ON ap.app_id = t.scope
          WHERE {filter}
          ORDER BY t.used_at DESC, t.source
-         LIMIT ?5 OFFSET ?6"
+         LIMIT ?6 OFFSET ?7"
     ))?;
     let rows = stmt
-        .query_map(params![lang, kw, manual_only as i64, app_param, limit, offset], |r| {
+        .query_map(params![lang, kw, manual, app_param, keep, limit, offset], |r| {
+            let scope: String = r.get(1)?;
+            let app_name: String = r.get(2)?;
+            let linked: Option<String> = r.get(10)?;
             Ok(Entry {
                 lang: r.get(0)?,
-                scope: r.get(1)?,
-                app_name: r.get(2)?,
+                apps: entry_apps(&scope, &app_name, linked.as_deref()),
+                scope,
+                app_name,
                 source: r.get(3)?,
                 target: r.get(4)?,
                 engine: r.get(5)?,
@@ -564,6 +584,21 @@ fn query_in(
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(Page { total, rows })
+}
+
+/// 一条译文归属的软件：按应用隔离的就是它所在的那个，共享长句是用过它的所有软件；都没有即“未分类”
+fn entry_apps(scope: &str, app_name: &str, linked: Option<&str>) -> Vec<AppRef> {
+    if !scope.is_empty() {
+        return vec![AppRef { id: scope.to_string(), name: app_name.to_string() }];
+    }
+    let mut out: Vec<AppRef> = linked
+        .unwrap_or_default()
+        .split('\u{1e}')
+        .filter_map(|s| s.split_once('\u{1f}'))
+        .map(|(id, name)| AppRef { id: id.to_string(), name: name.to_string() })
+        .collect();
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out
 }
 
 /// 某个目标语言的译文库概况（设置窗口概览页用）
@@ -738,6 +773,10 @@ fn clear_in(
 mod tests {
     use super::*;
 
+    fn by_app(app: Option<&str>) -> Filter<'_> {
+        Filter { app, ..Default::default() }
+    }
+
     fn mem() -> Connection {
         let c = Connection::open_in_memory().unwrap();
         init(&c).unwrap();
@@ -811,19 +850,19 @@ mod tests {
 
         let apps = list_apps_in(&c, "zh-CN").unwrap();
         assert_eq!(apps.len(), 3);
-        assert_eq!(query_in(&c, "zh-CN", "", false, Some("claude.exe"), 0, 20).unwrap().total, 2);
-        assert_eq!(query_in(&c, "zh-CN", "", false, Some(""), 0, 20).unwrap().total, 1);
+        assert_eq!(query_in(&c, "zh-CN", &by_app(Some("claude.exe")), 0, 20).unwrap().total, 2);
+        assert_eq!(query_in(&c, "zh-CN", &by_app(Some("")), 0, 20).unwrap().total, 1);
 
         // 清空 Claude：应删掉 Claude 的专属短词，但 long_sent 因 VS Code 也在用必须保留
         let cleared = clear_in(&mut c, "zh-CN", Some("claude.exe"), true).unwrap();
         assert_eq!(cleared, 2);
-        assert_eq!(query_in(&c, "zh-CN", "", false, Some("claude.exe"), 0, 20).unwrap().total, 0);
-        assert_eq!(query_in(&c, "zh-CN", "", false, Some("code.exe"), 0, 20).unwrap().total, 2);
-        assert_eq!(query_in(&c, "zh-CN", "", false, Some(""), 0, 20).unwrap().total, 1, "未分类不受影响");
+        assert_eq!(query_in(&c, "zh-CN", &by_app(Some("claude.exe")), 0, 20).unwrap().total, 0);
+        assert_eq!(query_in(&c, "zh-CN", &by_app(Some("code.exe")), 0, 20).unwrap().total, 2);
+        assert_eq!(query_in(&c, "zh-CN", &by_app(Some("")), 0, 20).unwrap().total, 1, "未分类不受影响");
 
         // 再清空 VS Code：此时 long_sent 已无其他软件关联，应连同共享长句一起删除
         clear_in(&mut c, "zh-CN", Some("code.exe"), true).unwrap();
-        assert_eq!(query_in(&c, "zh-CN", "", false, None, 0, 20).unwrap().total, 1);
+        assert_eq!(query_in(&c, "zh-CN", &by_app(None), 0, 20).unwrap().total, 1);
     }
 
     #[test]
@@ -847,7 +886,7 @@ mod tests {
         .unwrap();
         init(&c).unwrap();
 
-        let page = query_in(&c, "zh-CN", "", false, Some(""), 0, 10).unwrap();
+        let page = query_in(&c, "zh-CN", &by_app(Some("")), 0, 10).unwrap();
         assert_eq!(page.total, 2);
         let run = page.rows.iter().find(|r| r.source == "Run").unwrap();
         assert!(run.manual);
@@ -855,10 +894,18 @@ mod tests {
         let claude = page.rows.iter().find(|r| r.source == "Claude").unwrap();
         assert!(claude.keep);
 
+        // 更多筛选：来源、保留原文
+        let total = |manual, keep| query_in(&c, "zh-CN", &Filter { manual, keep, ..Default::default() }, 0, 10).unwrap().total;
+        assert_eq!(total(Some(true), None), 1, "只看手工");
+        assert_eq!(total(Some(false), None), 1, "只看自动");
+        assert_eq!(total(None, Some(true)), 1, "只看保留原文");
+        assert_eq!(total(None, Some(false)), 1, "排除保留原文");
+        assert_eq!(total(Some(true), Some(true)), 0);
+
         // 手工译文不被自动写入覆盖，且 clear(keep_manual=true) 保留
         put_many_in(&mut c, "zh-CN", "", "", &[("Run".into(), "跑".into(), false)], "edge").unwrap();
         assert_eq!(get_many_in(&c, "zh-CN", "", "", &["Run".into()]).unwrap()["Run"].0, "执行");
         clear_in(&mut c, "zh-CN", None, true).unwrap();
-        assert_eq!(query_in(&c, "zh-CN", "", false, None, 0, 10).unwrap().total, 1);
+        assert_eq!(query_in(&c, "zh-CN", &by_app(None), 0, 10).unwrap().total, 1);
     }
 }

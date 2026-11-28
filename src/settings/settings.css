@@ -2553,6 +2553,15 @@ h2.section .btn {
   color: var(--accent);
 }
 
+/* 可搜索下拉：箭头随展开翻转，和普通下拉框一致 */
+.input-wrap.combo.select button.input-icon svg {
+  transition: transform 0.25s var(--ease-spring);
+}
+
+.input-wrap.combo.select.open button.input-icon svg {
+  transform: rotate(180deg);
+}
+
 .dd-item.bad .dd-hint {
   color: var(--bad, #d14343);
   white-space: pre-wrap;
@@ -2947,9 +2956,176 @@ h2.section .spacer {
   flex: 1;
 }
 
-.toolbar select {
-  width: auto;
-  max-width: 220px;
+/* ───── 译文库“更多筛选”：按钮带生效条件数，面板在工具栏下方展开 ───── */
+.lib-filter-btn svg:last-child {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.25s var(--ease-spring);
+}
+
+.lib-filter-btn.open svg:last-child {
+  transform: rotate(180deg);
+}
+
+.lib-filter-btn.open {
+  color: var(--accent-text);
+}
+
+.filter-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.filter-count[hidden] {
+  display: none;
+}
+
+.lib-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 24px;
+  padding: 12px 16px 12px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.lib-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lib-filter-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.lib-filter-reset {
+  margin-left: auto;
+  font-size: 12.5px;
+}
+
+/* ───── 译文库“软件”列：表格够宽时图标 + 名称，窄时只留图标 ───── */
+#lib-table {
+  container-type: inline-size;
+}
+
+.lib-app-col {
+  width: 150px;
+}
+
+.lib-apps {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.lib-app-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 1px 6px 1px 1px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.lib-app-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.lib-app-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 首字图标：按程序名定色相，浅色 / 深色主题各一组明度 */
+.app-avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  background: hsl(var(--h) 70% 92%);
+  color: hsl(var(--h) 50% 34%);
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-avatar {
+    background: hsl(var(--h) 35% 26%);
+    color: hsl(var(--h) 75% 80%);
+  }
+}
+
+.lib-app-more,
+.lib-app-none {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.lib-app-more {
+  padding-left: 4px;
+  cursor: default;
+}
+
+@container (max-width: 820px) {
+  .lib-app-col {
+    width: 84px;
+  }
+
+  .lib-apps {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .lib-app-chip {
+    padding: 1px;
+  }
+
+  .lib-app-name {
+    display: none;
+  }
+}
+
+/* 来源列：标签放不下时省略，悬停看全称；删除列只容一个图标按钮 */
+.lib-engine-col {
+  width: 148px;
+}
+
+.tag.lib-engine {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.lib-del-col {
+  width: 44px;
+  padding-left: 0;
 }
 
 .lib-tags {
