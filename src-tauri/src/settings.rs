@@ -60,18 +60,26 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App("settings.html".into()))
         .portable_data()
         .title(t!("window.settings", app = t!("app.name")))
-        .inner_size(1000.0, 720.0)
+        // 高度要让概览页不出滚动条（内容约 730，留些余量给译文链路换行）
+        .inner_size(1000.0, 760.0)
         .min_inner_size(760.0, 520.0)
         // 不用系统标题栏：顶部空白处作拖动区，最小化 / 最大化 / 关闭按钮由页面自己画（见 settings.html 的 #titlebar）
         .decorations(false)
-        .center()
+        // 先隐藏着建好，还原上次的位置和大小后再显示，免得闪一下
+        .visible(false)
         .build()
         .map(|w| {
+            crate::window_state::restore_and_show(&w);
             let app = app.clone();
-            w.on_window_event(move |event| {
-                if matches!(event, tauri::WindowEvent::Destroyed) {
+            let window = w.clone();
+            w.on_window_event(move |event| match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    crate::window_state::remember(&window);
+                }
+                tauri::WindowEvent::Destroyed => {
                     let _ = app.emit("frame-corner-radius-preview", Option::<u8>::None);
                 }
+                _ => {}
             });
         })
         .map_err(|e| e.to_string())

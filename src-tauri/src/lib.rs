@@ -21,6 +21,7 @@ mod translate;
 mod tray;
 mod update;
 mod wgc;
+mod window_state;
 
 use std::sync::OnceLock;
 use tauri::RunEvent;
