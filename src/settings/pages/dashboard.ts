@@ -18,7 +18,7 @@ import { go } from "../nav";
 import { t } from "../../i18n";
 import { setMasterSwitch, toggleAllButton } from "./immersive";
 import { closeAllFrames, startSelect } from "./overlay";
-import { defaultBase, hostOf, protocolLabel } from "./engineShared";
+import { defaultBase, hostOf, protocolLabel, proxyField } from "./engineShared";
 
 function tile(ic: IconName, title: string, right: Child, ...body: Child[]): HTMLElement {
   return h(
@@ -30,13 +30,6 @@ function tile(ic: IconName, title: string, right: Child, ...body: Child[]): HTML
 }
 
 const more = (tab: string, label = t("dash.details")) => h("button", { class: "link-btn", onclick: () => go(tab) }, label, icon("arrow"));
-
-function proxySummaryText(proxy?: string): string {
-  const v = (proxy ?? "").trim();
-  if (!v || v === "direct") return t("proxy.direct");
-  if (v === "system") return t("proxy.system");
-  return v;
-}
 
 function renderChainNodePopover(id: string, nodeState: "idle" | "testing" | "ok" | "error" | "skipped"): HTMLElement {
   const c = cfg();
@@ -237,7 +230,7 @@ export function renderDashboard(root: HTMLElement) {
       "div",
       { class: "proxy-summary" },
       h("span", { class: "muted" }, t("general.proxy")),
-      h("b", { class: "clip", title: proxySummaryText(c.proxy) }, proxySummaryText(c.proxy)),
+      proxyField(c.proxy ?? "", null, (val) => saveConfig((x) => (x.proxy = val))),
     ),
   );
 

@@ -2695,18 +2695,19 @@ input.hotkey-input.recording::placeholder {
   background: var(--warn-dot);
 }
 
+/* 首页“语言与网络”里的网络：标签 + 与语言同款的下拉（自定义时下方多一个地址框） */
 .proxy-summary {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   margin-top: auto;
   padding-top: 12px;
   font-size: 12.5px;
 }
 
-.proxy-summary b {
-  font-weight: 500;
-  min-width: 0;
+/* 卡片较窄，自定义代理的地址框换到下一行 */
+.proxy-summary .proxy-field {
+  grid-template-columns: 1fr;
 }
 
 .status-banner {

@@ -2,7 +2,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { FilterEvent, FilterRuleSet, StoreAppSummary, cfg, loadStats, loadView, saveConfig } from "../state";
 import { t } from "../../i18n";
-import { emptyState, errText, h, icon, pageHead, toast } from "../ui";
+import { dropdown, emptyState, errText, h, icon, pageHead, toast } from "../ui";
 
 const GLOBAL_SCOPE = "__global__";
 
@@ -110,17 +110,39 @@ function readDraft(scope: string): Draft {
   };
 }
 
+/** 作用范围下拉：全局 + 各软件（显示名与程序名不同时把程序名作小字提示） */
+function scopeDropdown(scopes: { id: string; label: string }[], onPick: () => void): HTMLElement {
+  const options = scopes.map((s) => ({ value: s.id, label: s.label, hint: s.id !== GLOBAL_SCOPE && s.label !== s.id ? s.id : undefined }));
+  return dropdown(
+    options,
+    selectedScope,
+    (v) => {
+      selectedScope = v;
+      dirty = false;
+      draft = null;
+      onPick();
+    },
+    { title: t("filter.scope.label") },
+  );
+}
+
+/** 软件列表加载完后刷新作用范围下拉的选项 */
 function populateScopeSelect() {
-  const select = document.getElementById("filter-scope-select") as HTMLSelectElement | null;
-  if (!select) return;
+  const slot = document.getElementById("filter-scope-slot");
+  if (!slot) return;
   const scopes = collectScopes();
   if (!scopes.some((s) => s.id === selectedScope)) {
     selectedScope = GLOBAL_SCOPE;
     dirty = false;
     draft = null;
   }
-  select.replaceChildren(...scopes.map((s) => h("option", { value: s.id }, s.label)));
-  select.value = selectedScope;
+  const host = document.getElementById("tab-filter");
+  slot.replaceChildren(
+    scopeDropdown(scopes, () => {
+      if (host) renderFilter(host);
+      void loadFilterEvents();
+    }),
+  );
 }
 
 export function renderFilter(root: HTMLElement) {
@@ -135,18 +157,13 @@ export function renderFilter(root: HTMLElement) {
   const rerender = () => renderFilter(root);
 
   const scopeSelect = h(
-    "select",
-    { id: "filter-scope-select", title: t("filter.scope.label") },
-    ...scopes.map((s) => h("option", { value: s.id }, s.label)),
+    "span",
+    { id: "filter-scope-slot" },
+    scopeDropdown(scopes, () => {
+      rerender();
+      void loadFilterEvents();
+    }),
   );
-  scopeSelect.value = selectedScope;
-  scopeSelect.addEventListener("change", () => {
-    selectedScope = scopeSelect.value;
-    dirty = false;
-    draft = null;
-    rerender();
-    void loadFilterEvents();
-  });
 
   const keepTermsEl = h("textarea", { class: "rule-box", placeholder: t("filter.keepTerms.ph") }, current.keepTerms);
   keepTermsEl.addEventListener("input", () => {
