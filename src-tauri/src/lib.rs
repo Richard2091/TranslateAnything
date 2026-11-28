@@ -17,11 +17,13 @@ mod motion;
 mod ocr;
 mod settings;
 mod single_instance;
+mod site_icon;
 mod store;
 mod translate;
 mod tray;
 mod update;
 mod wgc;
+mod window_state;
 
 use std::sync::OnceLock;
 use tauri::RunEvent;
@@ -34,7 +36,13 @@ static IMMERSIVE_HOTKEY: OnceLock<Shortcut> = OnceLock::new();
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 在注册快捷键、创建托盘或读取用户配置之前拦截重复启动。
-    let instance = match single_instance::acquire() {
+    // 便携版更新后由旧进程拉起：旧进程正在退出，多等一会儿单实例锁
+    let acquired = if std::env::args().any(|a| a == update::AFTER_UPDATE_ARG) {
+        single_instance::acquire_wait(15_000)
+    } else {
+        single_instance::acquire()
+    };
+    let instance = match acquired {
         Ok(Some(instance)) => instance,
         Ok(None) => return,
         Err(e) => {
@@ -146,6 +154,8 @@ pub fn run() {
             settings::engine_test_chain,
             settings::engine_cooldowns,
             settings::llm_models,
+            settings::provider_site_icon,
+            settings::site_icon_prune,
             settings::pick_exe,
             settings::overlay_start,
             settings::ocr_languages,

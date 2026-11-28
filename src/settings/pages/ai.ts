@@ -46,7 +46,7 @@ import {
   wireParams,
   type AiPreset,
 } from "./engineShared";
-import { providerLogo } from "../logos";
+import { hasLogo, pickImage, providerIcon, providerLogo, pruneSiteIcons } from "../logos";
 
 const opened = new Set<string>();
 
@@ -119,10 +119,12 @@ async function removeProvider(id: string) {
   const wasLlm = methodOf(c) === "llm";
   const nextChain = aiChain(c).filter((x) => x !== id);
   const msg = wasLlm && nextChain.length === 0 ? t("ai.toast.removedFallback", { name }) : t("ai.toast.removed", { name });
-  await saveConfig((x) => {
+  const ok2 = await saveConfig((x) => {
     delete x.engines[id];
     setAiChain(x, aiChain(x).filter((v) => v !== id));
   }, msg);
+  // 上传的图片随配置一起删了；网站图标缓存按域名存，没有别的引擎用同一域名就删掉
+  if (ok2) pruneSiteIcons();
 }
 
 async function enable(id: string, name: string) {
@@ -223,6 +225,58 @@ function openAddDialog() {
   requestAnimationFrame(() => (list.style.minHeight = `${list.offsetHeight}px`));
 }
 
+/** 供应商当前显示的图标；自动模式按接口地址（留空时按协议默认地址）匹配内置 logo */
+function rowIcon(id: string, override?: string): HTMLElement {
+  const c = cfg();
+  const p = { ...(c.engines[id] ?? blankProvider()) };
+  if (override !== undefined) p.icon = override;
+  const kind = kindOf(c, id);
+  return providerIcon(id, p, presetOf(kind, p.base_url || defaultBase(kind, p))?.id);
+}
+
+function setIcon(id: string, value: string) {
+  return saveConfig((x) => {
+    const p = (x.engines[id] ??= blankProvider());
+    if (value) p.icon = value;
+    else delete p.icon;
+  }, "");
+}
+
+/** 选图标：自动 / 通用 / 上传的图片 / 内置 logo */
+function openIconPicker(id: string) {
+  const cur = cfg().engines[id]?.icon?.trim() ?? "";
+  const pick = (value: string) => {
+    dlg.close();
+    void setIcon(id, value);
+  };
+  const tile = (value: string, logo: HTMLElement, label: string, onclick = () => pick(value)) =>
+    h("button", { type: "button", class: `icon-tile${value === cur ? " selected" : ""}`, title: label, onclick }, logo, h("span", { class: "clip" }, label));
+  const upload = async () => {
+    const data = await pickImage();
+    if (data === null) return;
+    if (!data) return toast(t("ai.icon.badImage"), true);
+    pick(data);
+  };
+  const special = [
+    tile("", rowIcon(id, ""), t("ai.icon.auto")),
+    tile("none", providerLogo(undefined), t("ai.icon.none")),
+    cur.startsWith("data:image/") && tile(cur, rowIcon(id), t("ai.icon.custom")),
+    tile("upload", h("span", { class: "logo generic", "aria-hidden": "true" }, icon("plus")), t("ai.icon.upload"), () => void upload()),
+  ];
+  // 只显示主名称，去掉括号里的补充说明（如“阿里云百炼（通义千问）”→“阿里云百炼”）
+  const shortName = (p: AiPreset) => presetName(p).replace(/\s*[（(][^（）()]*[）)]\s*/g, " ").trim();
+  const builtin = AI_PRESETS.filter((p) => hasLogo(p.id)).map((p) => tile(`preset:${p.id}`, providerLogo(p.id), shortName(p)));
+  const body = h(
+    "div",
+    {},
+    h("p", { class: "muted" }, t("ai.icon.desc")),
+    h("div", { class: "icon-grid" }, ...special),
+    h("div", { class: "preset-group-title" }, t("ai.icon.builtin")),
+    h("div", { class: "icon-grid" }, ...builtin),
+  );
+  const dlg = openDialog(t("ai.icon.title"), body, [h("button", { class: "btn", onclick: () => dlg.close() }, t("common.cancel"))]);
+}
+
 function aiRow(id: string, chain: string[]): HTMLElement {
   const c = cfg();
   const p = c.engines[id] ?? blankProvider();
@@ -278,7 +332,7 @@ function aiRow(id: string, chain: string[]): HTMLElement {
       title: t("engines.order.params"),
     },
       h("span", { class: "engine-num" }, on ? String(pos + 1) : ""),
-      providerLogo(presetOf(kind, p.base_url)?.id),
+      rowIcon(id),
       h(
         "div",
         { class: "grow" },
@@ -324,7 +378,14 @@ function aiRow(id: string, chain: string[]): HTMLElement {
       { width: "100%", placeholder: t("ai.custom.pickProtocol") },
     );
 
-    const extra = [field(t("engines.field.name.label"), nameInput), field(t("engines.field.protocol.label"), protoDrop)];
+    const iconBtn = h(
+      "button",
+      { type: "button", class: "icon-pick", title: t("ai.icon.change"), "aria-label": t("ai.icon.change"), onclick: () => openIconPicker(id) },
+      rowIcon(id),
+    );
+    // 图标和名称并排，各带自己的标题
+    const nameBox = h("div", { class: "name-with-icon" }, field(t("ai.icon.label"), iconBtn), field(t("engines.field.name.label"), nameInput));
+    const extra = [nameBox, field(t("engines.field.protocol.label"), protoDrop)];
     return h("div", { class: "engine-params" }, paramFields(id, ["base_url", "api_key", "model", "concurrency", "proxy"], true, extra));
   };
 

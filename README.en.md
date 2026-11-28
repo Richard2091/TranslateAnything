@@ -114,6 +114,7 @@ Requirements: Windows 10 / 11. The portable version requires the WebView2 runtim
 ## Roadmap
 
 - Translation filter: automatically skip code, paths, brand names and other text that shouldn't be translated
+- Translation scope: translate all, an allowlist or a blocklist per app; press a hotkey to pick areas right inside the app
 - Visual translation: LLMs translating directly from the image
 - Live speech interpretation, speech-to-subtitles
 - More interface languages

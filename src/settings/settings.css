@@ -2941,6 +2941,88 @@ input.hotkey-input.recording::placeholder {
   height: 30px;
 }
 
+/* 上传的图片 / 网站图标 */
+.logo img {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+  border-radius: 4px;
+}
+
+/* 名称左边的图标（各带标题） */
+.name-with-icon {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.name-with-icon > .field:last-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.icon-pick {
+  display: block;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  cursor: pointer;
+}
+
+.icon-pick .logo {
+  width: 34px;
+  height: 34px;
+  transition: border-color 0.15s;
+}
+
+.icon-pick:hover .logo,
+.icon-pick:focus-visible .logo {
+  border-color: var(--accent);
+}
+
+/* 选图标对话框 */
+.icon-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+.icon-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+/* 名称最多两行（如“阿里云百炼（通义千问）”） */
+.icon-tile > span:last-child {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  max-width: 100%;
+  overflow: hidden;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.icon-tile:hover,
+.icon-tile.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 
 .preset-name {
   font-size: 13px;
@@ -3036,6 +3118,10 @@ h2.section .spacer {
   width: 150px;
 }
 
+.lib-engine-col {
+  width: 148px;
+}
+
 .lib-apps {
   display: flex;
   flex-direction: column;
@@ -3109,6 +3195,10 @@ h2.section .spacer {
     width: 84px;
   }
 
+  .lib-engine-col {
+    width: 128px;
+  }
+
   .lib-apps {
     flex-direction: row;
     flex-wrap: wrap;
@@ -3123,11 +3213,17 @@ h2.section .spacer {
   }
 }
 
-/* 来源列：标签放不下时省略，悬停看全称；删除列只容一个图标按钮 */
-.lib-engine-col {
-  width: 148px;
+/* 工具栏：软件选择框在前，窄窗口时两个搜索框一起收缩 */
+#lib-app-slot {
+  flex: 0 1 220px;
+  min-width: 130px;
 }
 
+.lib-search {
+  min-width: 120px;
+}
+
+/* 来源列标签放不下时省略，悬停看全称；删除列只容一个图标按钮 */
 .tag.lib-engine {
   max-width: 100%;
   overflow: hidden;

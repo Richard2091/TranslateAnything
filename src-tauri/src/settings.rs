@@ -60,18 +60,26 @@ pub fn open_settings(app: &AppHandle) -> Result<(), String> {
     WebviewWindowBuilder::new(app, SETTINGS_LABEL, WebviewUrl::App("settings.html".into()))
         .portable_data()
         .title(t!("window.settings", app = t!("app.name")))
-        .inner_size(1000.0, 720.0)
+        // 高度要让概览页不出滚动条（内容约 730，留些余量给译文链路换行）
+        .inner_size(1000.0, 760.0)
         .min_inner_size(760.0, 520.0)
         // 不用系统标题栏：顶部空白处作拖动区，最小化 / 最大化 / 关闭按钮由页面自己画（见 settings.html 的 #titlebar）
         .decorations(false)
-        .center()
+        // 先隐藏着建好，还原上次的位置和大小后再显示，免得闪一下
+        .visible(false)
         .build()
         .map(|w| {
+            crate::window_state::restore_and_show(&w);
             let app = app.clone();
-            w.on_window_event(move |event| {
-                if matches!(event, tauri::WindowEvent::Destroyed) {
+            let window = w.clone();
+            w.on_window_event(move |event| match event {
+                tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => {
+                    crate::window_state::remember(&window);
+                }
+                tauri::WindowEvent::Destroyed => {
                     let _ = app.emit("frame-corner-radius-preview", Option::<u8>::None);
                 }
+                _ => {}
             });
         })
         .map_err(|e| e.to_string())
@@ -348,6 +356,22 @@ pub async fn llm_models(id: String) -> Result<Vec<String>, String> {
     let provider = cfg.provider(&id);
     let kind = provider.kind_or(&id);
     translate::list_models(&kind, &provider).await
+}
+
+/// AI 供应商的网站图标（按已保存的接口地址和代理取，带磁盘缓存，见 `site_icon`）
+#[tauri::command]
+pub async fn provider_site_icon(id: String) -> Result<Option<crate::site_icon::SiteIcon>, String> {
+    let cfg = config::load()?;
+    let provider = cfg.provider(&id);
+    let proxy = provider.proxy.clone().unwrap_or_default();
+    Ok(crate::site_icon::fetch(&provider.base_url, &proxy).await)
+}
+
+/// 清理不再被任何引擎使用的网站图标缓存（删除供应商、改接口地址后调用）
+#[tauri::command]
+pub fn site_icon_prune() -> Result<(), String> {
+    crate::site_icon::prune(&config::load()?);
+    Ok(())
 }
 
 /// 按当前生效调用链逐节点测速，并通过事件向设置窗口推送每步状态

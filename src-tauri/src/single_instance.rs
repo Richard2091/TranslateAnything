@@ -21,11 +21,16 @@ impl Drop for InstanceGuard {
 
 /// 获取当前会话的启动锁，已有实例持有时立即返回 `None`。
 pub(crate) fn acquire() -> Result<Option<InstanceGuard>> {
-    acquire_named(LOCK_NAME)
+    acquire_named(LOCK_NAME, 0)
+}
+
+/// 同上，但最多等 `timeout_ms` 毫秒让旧实例退出（便携版更新后重启时用）。
+pub(crate) fn acquire_wait(timeout_ms: u32) -> Result<Option<InstanceGuard>> {
+    acquire_named(LOCK_NAME, timeout_ms)
 }
 
 /// 创建或打开命名互斥量，并尝试在当前线程取得所有权。
-fn acquire_named(name: PCWSTR) -> Result<Option<InstanceGuard>> {
+fn acquire_named(name: PCWSTR, timeout_ms: u32) -> Result<Option<InstanceGuard>> {
     // 仅申请等待权限，句柄不会继承给子进程。
     let handle = unsafe {
         Owned::new(CreateMutexExW(
@@ -35,8 +40,8 @@ fn acquire_named(name: PCWSTR) -> Result<Option<InstanceGuard>> {
             SYNCHRONIZATION_SYNCHRONIZE.0,
         )?)
     };
-    // 零超时等待原子地取得所有权。若原持有者异常退出，也可接管。
-    match unsafe { WaitForSingleObject(*handle, 0) } {
+    // 等待（默认零超时）原子地取得所有权。若原持有者异常退出，也可接管。
+    match unsafe { WaitForSingleObject(*handle, timeout_ms) } {
         WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(Some(InstanceGuard(handle))),
         WAIT_TIMEOUT => Ok(None),
         _ => Err(Error::from_thread()),
@@ -58,7 +63,7 @@ mod tests {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-        let guard = acquire_named(PCWSTR(name.as_ptr())).unwrap().unwrap();
+        let guard = acquire_named(PCWSTR(name.as_ptr()), 0).unwrap().unwrap();
 
         // 保留独立句柄，确保释放前后测试的是同一个互斥量。
         let observer = unsafe {
@@ -76,7 +81,7 @@ mod tests {
         let try_from_other_thread = || {
             std::thread::scope(|scope| {
                 scope
-                    .spawn(|| acquire_named(PCWSTR(name.as_ptr())).unwrap().is_some())
+                    .spawn(|| acquire_named(PCWSTR(name.as_ptr()), 0).unwrap().is_some())
                     .join()
                     .unwrap()
             })

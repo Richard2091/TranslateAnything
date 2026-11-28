@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { S, cfg, engineInfo, kindOf, refresh, saveConfig, saving, settled, testEngine, type ProviderConfig } from "../state";
 import { t } from "../../i18n";
 import { collapse, collapsible, combo, dropdown, expand, field, fmtSec, h, icon, type DropOption } from "../ui";
+import { pruneSiteIcons } from "../logos";
 
 /** 可配置的参数；标签和提示文字取 engines.field.<参数>.label / .ph */
 const FIELDS = new Set(["base_url", "api_key", "region", "model", "concurrency", "proxy"]);
@@ -14,9 +15,9 @@ export const blankProvider = (): ProviderConfig => ({ name: "", base_url: "", ap
 /** DeepL 免费版地址（免费版密钥以 :fx 结尾） */
 const DEEPL_FREE = "https://api-free.deepl.com";
 
-export function setParam(id: string, key: string, raw: string) {
+export async function setParam(id: string, key: string, raw: string) {
   const v = raw.trim();
-  return saveConfig((c) => {
+  const ok = await saveConfig((c) => {
     const p = (c.engines[id] ??= blankProvider());
     if (key === "proxy") p.proxy = v || null;
     else if (key === "concurrency") {
@@ -24,6 +25,9 @@ export function setParam(id: string, key: string, raw: string) {
       p.concurrency = v && Number.isFinite(n) && n >= 1 ? Math.min(16, Math.round(n)) : null;
     } else (p as unknown as Record<string, string>)[key] = v;
   });
+  // 换了接口地址，旧域名的网站图标可能没人用了
+  if (ok && key === "base_url") pruneSiteIcons();
+  return ok;
 }
 
 export function hostOf(url: string): string {

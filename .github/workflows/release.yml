@@ -149,3 +149,61 @@ jobs:
             src-tauri/target/${{ matrix.target }}/release/bundle/nsis/*.exe
             ${{ env.PORTABLE_ZIP }}
           if-no-files-found: error
+
+  # 更新清单 latest.json：各架构都传完后，下载本 Release 的全部安装包，记下大小和 SHA-256，并用私钥签名。
+  # 程序经 releases/latest/download/latest.json 这个固定地址检查更新，GitHub 加速镜像也能转发；
+  # 清单必须通过签名校验（latest.json.sig，Ed25519），安装包再按清单里的 SHA-256 校验（见 src-tauri/src/update.rs）。
+  # 需要仓库 Secrets 里有 UPDATE_SIGNING_KEY（PEM 格式的 Ed25519 私钥），缺了就让发布失败，不发未签名的清单
+  manifest:
+    name: 生成并签名更新清单
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v7
+
+      - name: 生成、签名并上传 latest.json
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "$UPDATE_SIGNING_KEY" ]; then
+            echo "::error::缺少 Secrets UPDATE_SIGNING_KEY，无法签名更新清单"
+            exit 1
+          fi
+          work="$RUNNER_TEMP/manifest"
+          mkdir -p "$work/assets"
+          key="$RUNNER_TEMP/update-key.pem"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key"
+          chmod 600 "$key"
+          # 私钥对应的公钥必须是程序内置的公钥之一，否则签了也验不过
+          pub=$(openssl pkey -in "$key" -pubout -outform DER | tail -c 32 | od -An -tx1 | tr -d ' \n')
+          if ! grep -q "\"$pub\"" src-tauri/src/update.rs; then
+            echo "::error::签名私钥与 update.rs 里的 UPDATE_PUBKEYS 不匹配（公钥 $pub）"
+            exit 1
+          fi
+
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$work/assets" \
+            --pattern '*.exe' --pattern '*.msi' --pattern '*.zip'
+          manifest="$work/latest.json"
+          jq -n --arg version "${TAG#v}" --arg published_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{version: $version, published_at: $published_at, assets: []}' > "$manifest"
+          for f in "$work"/assets/*; do
+            jq --arg name "$(basename "$f")" --argjson size "$(stat -c %s "$f")" \
+              --arg sha256 "$(sha256sum "$f" | cut -d' ' -f1)" \
+              '.assets += [{name: $name, size: $size, sha256: $sha256}]' "$manifest" > "$manifest.tmp"
+            mv "$manifest.tmp" "$manifest"
+          done
+          cat "$manifest"
+
+          # 对清单原始字节做 Ed25519 签名，以十六进制保存，并用公钥自检一遍
+          openssl pkeyutl -sign -inkey "$key" -rawin -in "$manifest" -out "$work/sig.bin"
+          openssl pkey -in "$key" -pubout -out "$work/pub.pem"
+          openssl pkeyutl -verify -pubin -inkey "$work/pub.pem" -rawin -in "$manifest" -sigfile "$work/sig.bin"
+          od -An -tx1 "$work/sig.bin" | tr -d ' \n' > "$manifest.sig"
+
+          gh release upload "$TAG" "$manifest" "$manifest.sig" --repo "$GITHUB_REPOSITORY" --clobber
