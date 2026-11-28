@@ -170,6 +170,24 @@ pub async fn immersive_detect() -> Vec<DetectedApp> {
     immersive::detect_apps().await
 }
 
+/// 程序的显示名（版本信息里的名称，没有则用文件名）
+#[tauri::command]
+pub async fn app_name(exe: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || immersive::display_name(std::path::Path::new(exe.trim())))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 程序图标：宽、高各 4 字节（小端）+ RGBA 像素；取不到时为空
+#[tauri::command]
+pub async fn app_icon(exe: String) -> tauri::ipc::Response {
+    let px = tauri::async_runtime::spawn_blocking(move || crate::appinfo::icon_rgba(std::path::Path::new(exe.trim()), 64))
+        .await
+        .ok()
+        .flatten();
+    tauri::ipc::Response::new(px.map_or_else(Vec::new, |(w, h, px)| [&w.to_le_bytes()[..], &h.to_le_bytes(), &px].concat()))
+}
+
 #[tauri::command]
 pub fn store_query(keyword: String, manual_only: bool, offset: i64, limit: i64) -> Result<store::Page, String> {
     let lang = config::load()?.target_lang;

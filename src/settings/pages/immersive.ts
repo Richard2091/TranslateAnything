@@ -217,7 +217,7 @@ function targetCard(tg: ImmersiveTarget): HTMLElement {
     h(
       "div",
       { class: "row", style: "gap:14px; align-items:flex-start" },
-      avatar(tg.name),
+      avatar(tg.name, tg.exe),
       h(
         "div",
         { class: "grow" },
@@ -302,7 +302,7 @@ function appForm(d: ImmersiveTarget) {
           const p = await invoke<string | null>("pick_exe", { current: exe.value });
           if (p) {
             exe.value = p;
-            if (!name.value.trim()) name.value = p.split(/[\\/]/).pop()!.replace(/\.exe$/i, "");
+            if (!name.value.trim()) name.value = await invoke<string>("app_name", { exe: p });
           }
         } catch (e) {
           toast(errText(e), true);
@@ -411,7 +411,7 @@ function detectDialog() {
             h(
               "div",
               { class: `pick-item${a.configured ? " done" : ""}` },
-              avatar(a.name),
+              avatar(a.name, a.exe),
               h(
                 "div",
                 { class: "grow" },

@@ -221,10 +221,11 @@ pub async fn detect_apps() -> Vec<DetectedApp> {
     let configured: Vec<String> = config::load()
         .map(|c| c.immersive.targets.into_iter().map(|t| t.exe).collect())
         .unwrap_or_default();
-    let apps = blocking(procs::running_apps).await;
+    // 读版本信息要访问文件，一并放到后台线程
+    let apps = blocking(|| procs::running_apps().into_iter().map(|(exe, v)| (display_name(&exe), exe, v)).collect::<Vec<_>>()).await;
     apps.into_iter()
-        .map(|(exe, (kind, port))| DetectedApp {
-            name: display_name(&exe),
+        .map(|(name, exe, (kind, port))| DetectedApp {
+            name,
             configured: configured.iter().any(|c| procs::same_path(Path::new(c), &exe)),
             exe: exe.to_string_lossy().into_owned(),
             kind,
@@ -233,8 +234,13 @@ pub async fn detect_apps() -> Vec<DetectedApp> {
         .collect()
 }
 
-/// 显示名：程序名；像 app.exe 这种通用名字时带上目录名
-fn display_name(exe: &Path) -> String {
+/// 显示名：先取程序版本信息里的名称（如"Claude"），没有再用文件名
+pub fn display_name(exe: &Path) -> String {
+    crate::appinfo::friendly_name(exe).unwrap_or_else(|| file_name(exe))
+}
+
+/// 文件名；像 app.exe 这种通用名字时带上目录名
+fn file_name(exe: &Path) -> String {
     let stem = exe.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let generic = ["app", "electron", "main", "launcher"];
     match exe.parent().and_then(|d| d.file_name()) {

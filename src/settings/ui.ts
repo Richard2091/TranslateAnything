@@ -1,4 +1,5 @@
 // 设置窗口通用小部件：元素构造、图标、开关、分段选择、提示与对话框
+import { invoke } from "@tauri-apps/api/core";
 import { fmtDate, fmtNum, locale, t } from "../i18n";
 
 export type Child = Node | string | null | undefined | false;
@@ -91,12 +92,43 @@ export function section(title: string, ...extra: Child[]): HTMLElement {
   return h("h2", { class: "section" }, title, ...extra);
 }
 
-/** 应用头像：取名称首字，颜色按名称散列，同一个应用每次颜色一致 */
-export function avatar(name: string): HTMLElement {
+/** 程序图标（data URL），按路径缓存；取不到时为 null */
+const iconCache = new Map<string, Promise<string | null>>();
+
+function appIcon(exe: string): Promise<string | null> {
+  const key = exe.trim().toLowerCase();
+  let p = iconCache.get(key);
+  if (!p) {
+    p = invoke<ArrayBuffer>("app_icon", { exe })
+      .then((buf) => {
+        if (buf.byteLength <= 8) return null;
+        const v = new DataView(buf);
+        const [w, hgt] = [v.getUint32(0, true), v.getUint32(4, true)];
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = hgt;
+        canvas.getContext("2d")!.putImageData(new ImageData(new Uint8ClampedArray(buf, 8, w * hgt * 4), w, hgt), 0, 0);
+        return canvas.toDataURL();
+      })
+      .catch(() => null);
+    iconCache.set(key, p);
+  }
+  return p;
+}
+
+/** 应用头像：有程序路径时显示程序图标；否则（或取不到时）取名称首字，颜色按名称散列，同一个应用每次颜色一致 */
+export function avatar(name: string, exe = ""): HTMLElement {
   let hash = 0;
   for (const ch of name) hash = (hash * 31 + ch.codePointAt(0)!) >>> 0;
   const first = [...name.trim()][0]?.toUpperCase() ?? "?";
-  return h("div", { class: "app-avatar", style: `--h:${hash % 360}` }, first);
+  const el = h("div", { class: "app-avatar", style: `--h:${hash % 360}` }, first);
+  if (exe.trim())
+    appIcon(exe).then((src) => {
+      if (!src) return;
+      el.classList.add("has-icon");
+      el.replaceChildren(h("img", { src, alt: "" }));
+    });
+  return el;
 }
 
 export function emptyState(text: string, ic: IconName = "box"): HTMLElement {

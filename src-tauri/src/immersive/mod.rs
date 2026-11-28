@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{broadcast, watch};
 
-pub use launch::{DetectedApp, detect_apps, launch};
+pub use launch::{DetectedApp, detect_apps, display_name, launch};
 
 /// 应用的运行状态
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]

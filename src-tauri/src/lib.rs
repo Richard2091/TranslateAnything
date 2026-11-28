@@ -2,6 +2,7 @@
 mod i18n;
 #[macro_use]
 mod timing;
+mod appinfo;
 mod autostart;
 mod capture;
 mod dialog;
@@ -129,6 +130,8 @@ pub fn run() {
             settings::immersive_set_show,
             settings::immersive_launch,
             settings::immersive_detect,
+            settings::app_name,
+            settings::app_icon,
             settings::store_query,
             settings::store_set,
             settings::store_delete,

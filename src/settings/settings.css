@@ -1420,6 +1420,18 @@ kbd {
   }
 }
 
+/* 有程序图标时不要底色和描边，图标本身就是头像 */
+.app-avatar.has-icon {
+  background: none;
+  box-shadow: none;
+}
+
+.app-avatar.has-icon img {
+  width: 80%;
+  height: 80%;
+  object-fit: contain;
+}
+
 .app-title {
   display: flex;
   align-items: center;
