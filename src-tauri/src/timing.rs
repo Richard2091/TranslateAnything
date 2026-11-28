@@ -11,7 +11,19 @@ macro_rules! tlog {
     };
 }
 
-/// 毫秒，保留一位小数
-pub fn ms(d: Duration) -> String {
-    format!("{:.1}ms", d.as_secs_f64() * 1000.0)
+/// 秒，保留两位小数
+pub fn secs(d: Duration) -> String {
+    format!("{:.2} s", d.as_secs_f64())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 耗时格式化为两位小数秒() {
+        assert_eq!(secs(Duration::from_millis(0)), "0.00 s");
+        assert_eq!(secs(Duration::from_millis(684)), "0.68 s");
+        assert_eq!(secs(Duration::from_millis(1236)), "1.24 s");
+    }
 }

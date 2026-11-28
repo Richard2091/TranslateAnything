@@ -261,8 +261,8 @@ async fn answer(cdp: cdp::Cdp, ctx_id: i64, payload: String, app: AppHandle, sta
     tlog!(
         "沉浸模式 本批 {} 条：翻译 {} · 回填页面 {} · 共 {}",
         texts.len(),
-        crate::timing::ms(translated_at),
-        crate::timing::ms(start.elapsed() - translated_at),
-        crate::timing::ms(start.elapsed())
+        crate::timing::secs(translated_at),
+        crate::timing::secs(start.elapsed() - translated_at),
+        crate::timing::secs(start.elapsed())
     );
 }

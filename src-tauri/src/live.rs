@@ -22,7 +22,7 @@ use crate::layout::{self, Block};
 use crate::motion::{self, Frame};
 use crate::ocr;
 use crate::config::PortableWebview;
-use crate::timing::ms;
+use crate::timing::secs;
 use crate::translate;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -592,12 +592,12 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                         "悬浮窗 {}×{}：截屏 {} · 灰度化 {} · 画面比对 {} · OCR {}（{} 行）· 分段 {}（{} 段）",
                         image.width(),
                         image.height(),
-                        ms(cap_time),
-                        ms(gray_time),
-                        ms(cmp_time),
-                        ms(ocr_time),
+                        secs(cap_time),
+                        secs(gray_time),
+                        secs(cmp_time),
+                        secs(ocr_time),
                         out.lines.len(),
-                        ms(t.elapsed()),
+                        secs(t.elapsed()),
                         blocks.len()
                     );
                     // 截图可能因超出屏幕被裁过，换算回相对翻译框的坐标
@@ -695,10 +695,10 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         drop(s);
         if let Some(t) = round_start {
             if payload.error.is_some() {
-                tlog!("悬浮窗 本轮出错，从画面变化起已过 {}", ms(t.elapsed()));
+                tlog!("悬浮窗 本轮出错，从画面变化起已过 {}", secs(t.elapsed()));
                 round_start = None;
             } else if settled && payload.pending == 0 {
-                tlog!("悬浮窗 本轮 {} 段：画面变化 → 译文全部上屏 共 {}", payload.blocks.len(), ms(t.elapsed()));
+                tlog!("悬浮窗 本轮 {} 段：画面变化 → 译文全部上屏 共 {}", payload.blocks.len(), secs(t.elapsed()));
                 round_start = None;
             }
         }

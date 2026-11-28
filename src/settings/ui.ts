@@ -57,6 +57,7 @@ const ICONS = {
   grip: '<g fill="currentColor" stroke="none"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></g>',
   eye: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
   refresh: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3L19.5 9"/><path d="M19.5 4v5h-5"/>',
+  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 } as const;
 
 export type IconName = keyof typeof ICONS;
@@ -678,3 +679,85 @@ export function relTime(sec: number): string {
 export const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
 
 export const fmt = (n: number) => fmtNum(n);
+
+/** 毫秒转为两位小数秒字符串，如 0.68 s */
+export function fmtSec(ms: number): string {
+  return `${(ms / 1000).toFixed(2)} s`;
+}
+
+// ───────────────────────── 统一样式悬浮详情卡 ─────────────────────────
+
+let activePop: { trigger: HTMLElement; pop: HTMLElement; close: () => void } | null = null;
+
+/** 重绘后清理已脱离 DOM 的锚点浮层，避免残留 */
+export function cleanupStalePopovers() {
+  if (activePop && !activePop.trigger.isConnected) {
+    activePop.close();
+  }
+}
+
+function placeHoverPop(pop: HTMLElement, anchor: HTMLElement) {
+  const r = anchor.getBoundingClientRect();
+  const pw = Math.min(340, window.innerWidth - 16);
+  pop.style.maxWidth = `${pw}px`;
+  const ph = Math.min(pop.scrollHeight, 260);
+  const below = window.innerHeight - r.bottom - 10;
+  const up = below < ph && r.top > below;
+  pop.style.top = pop.style.bottom = "";
+  pop.classList.toggle("up", up);
+  const actualW = Math.min(pop.offsetWidth || pw, pw);
+  const left = Math.max(8, Math.min(r.left, window.innerWidth - actualW - 8));
+  pop.style.left = `${left}px`;
+  if (up) pop.style.bottom = `${window.innerHeight - r.top + 6}px`;
+  else pop.style.top = `${r.bottom + 6}px`;
+}
+
+/**
+ * 给元素挂载统一样式的悬停/聚焦详情浮层（挂在 body 上，不裁切、可移入复制文字）
+ */
+export function attachPopover(trigger: HTMLElement, renderContent: () => HTMLElement | null) {
+  let closeTimer = 0;
+  let pop: HTMLElement | null = null;
+
+  const clearTimer = () => {
+    clearTimeout(closeTimer);
+    closeTimer = 0;
+  };
+
+  const close = () => {
+    clearTimer();
+    if (!pop) return;
+    const p = pop;
+    pop = null;
+    if (activePop?.pop === p) activePop = null;
+    window.removeEventListener("resize", close);
+    document.querySelector("main")?.removeEventListener("scroll", close);
+    p.remove();
+  };
+
+  const scheduleClose = () => {
+    clearTimer();
+    closeTimer = window.setTimeout(close, 120);
+  };
+
+  const open = () => {
+    clearTimer();
+    if (pop) return;
+    if (activePop && activePop.trigger !== trigger) activePop.close();
+    const content = renderContent();
+    if (!content) return;
+    pop = h("div", { class: "hover-pop", role: "tooltip" }, content);
+    pop.addEventListener("pointerenter", clearTimer);
+    pop.addEventListener("pointerleave", scheduleClose);
+    document.body.append(pop);
+    placeHoverPop(pop, trigger);
+    activePop = { trigger, pop, close };
+    window.addEventListener("resize", close);
+    document.querySelector("main")?.addEventListener("scroll", close, { passive: true });
+  };
+
+  trigger.addEventListener("pointerenter", open);
+  trigger.addEventListener("pointerleave", scheduleClose);
+  trigger.addEventListener("focus", open);
+  trigger.addEventListener("blur", scheduleClose);
+}

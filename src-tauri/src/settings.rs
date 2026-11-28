@@ -114,6 +114,7 @@ pub fn settings_save(app: AppHandle, mut config: Config) -> Result<(), String> {
     let previous = config::load().unwrap_or_default();
     config.store_dir = previous.store_dir;
     config::save(&config)?;
+    translate::clear_all_cooldowns();
     if config.frame_corner_radius != previous.frame_corner_radius {
         let _ = app.emit("frame-corner-radius", config.frame_corner_radius);
     }
@@ -223,11 +224,30 @@ pub async fn engine_test(id: String) -> Result<translate::EngineTest, String> {
     translate::test_engine(&cfg, &id).await
 }
 
-/// 列出大模型接口提供的模型（用已保存的接口地址、密钥和代理）
+/// 列出大模型接口提供的模型（用已保存的接口地址、密钥和代理，按协议分发）
 #[tauri::command]
 pub async fn llm_models(id: String) -> Result<Vec<String>, String> {
     let cfg = config::load()?;
-    translate::list_models(&cfg.provider(&id)).await
+    let provider = cfg.provider(&id);
+    let kind = provider.kind_or(&id);
+    translate::list_models(&kind, &provider).await
+}
+
+/// 按当前生效调用链逐节点测速，并通过事件向设置窗口推送每步状态
+#[tauri::command]
+pub async fn engine_test_chain(app: AppHandle, run_id: String) -> Result<Vec<translate::ChainTestStep>, String> {
+    let cfg = config::load()?;
+    let steps = translate::test_chain(&cfg, &run_id, |step| {
+        let _ = app.emit_to(SETTINGS_LABEL, "chain-test-step", step);
+    })
+    .await;
+    Ok(steps)
+}
+
+/// 当前处于失败冷却期的引擎 id
+#[tauri::command]
+pub fn engine_cooldowns() -> Vec<String> {
+    translate::cooling_ids()
 }
 
 /// 选择要接管的程序：弹出文件选择框，返回所选 .exe 的路径；用户取消时返回 None

@@ -31,6 +31,9 @@ pub struct Config {
     pub engine: String,
     /// 主引擎失败后依次尝试的引擎 id
     pub fallback: Vec<String>,
+    /// 已启用的 AI 供应商调用顺序（切回机器翻译时保留该顺序与启用状态，不丢失）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_chain: Vec<String>,
     /// 各引擎参数，键为引擎 id；未出现的引擎按默认参数使用
     pub engines: BTreeMap<String, ProviderConfig>,
     /// 全局代理，所有引擎默认都走它：留空 = 直连；`system` = 跟随系统环境变量；其他 = 代理地址。
@@ -75,6 +78,9 @@ impl Default for UpdateConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
+    /// 显示名称（AI 翻译多供应商实例用；留空时按类型回退默认名）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// 引擎类型（见 translate::CATALOG）；留空时取 `engines` 里的键名。
     /// 同一类型配置多份时用得上，例如两个不同的 openai 兼容服务。
     #[serde(rename = "type", skip_serializing_if = "String::is_empty")]
@@ -169,6 +175,7 @@ impl Default for Config {
             frame_corner_radius: 0,
             engine: "edge".into(),
             fallback: Vec::new(),
+            ai_chain: Vec::new(),
             engines: BTreeMap::new(),
             proxy: String::new(),
             persist_cache: true,
@@ -428,5 +435,17 @@ mod tests {
     fn 空配置默认edge() {
         let chain = Config::default().engine_chain();
         assert_eq!(chain[0].0, "edge");
+    }
+
+    #[test]
+    fn 供应商显示名与ai链字段兼容() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"engine":"ai_1","fallback":["edge"],"ai_chain":["ai_1","ai_2"],
+                "engines":{"ai_1":{"name":"DeepSeek","type":"openai"},"ai_2":{"name":"  ","type":"anthropic"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.ai_chain, ["ai_1", "ai_2"]);
+        assert_eq!(cfg.engines["ai_1"].name, "DeepSeek");
+        assert_eq!(cfg.engines["ai_2"].kind, "anthropic");
     }
 }

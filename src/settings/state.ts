@@ -1,6 +1,6 @@
 // 设置窗口的数据：类型、全局状态、保存配置、翻译方式换算
 import { invoke } from "@tauri-apps/api/core";
-import { clone, errText, toast } from "./ui";
+import { cleanupStalePopovers, clone, errText, toast } from "./ui";
 import { langLabel, t } from "../i18n";
 
 // ───────────────────────── 类型 ─────────────────────────
@@ -17,6 +17,7 @@ export interface ImmersiveTarget {
 }
 
 export interface ProviderConfig {
+  name?: string;
   type?: string;
   base_url: string;
   api_key: string;
@@ -35,6 +36,7 @@ export interface Config {
   ocr_lang: string;
   engine: string;
   fallback: string[];
+  ai_chain?: string[];
   engines: Record<string, ProviderConfig>;
   /** 全局代理：空 = 直连；system = 系统代理；其他 = 代理地址 */
   proxy?: string;
@@ -113,6 +115,17 @@ export interface EngineTest {
   ms: number;
 }
 
+export interface ChainTestStep {
+  run_id: string;
+  id: string;
+  name: string;
+  status: "testing" | "ok" | "error";
+  ms: number | null;
+  source: string | null;
+  text: string | null;
+  error: string | null;
+}
+
 // ───────────────────────── 全局状态 ─────────────────────────
 
 export const S = {
@@ -133,6 +146,15 @@ export const S = {
   },
   /** 各引擎最近一次测试结果（按引擎 id） */
   tests: {} as Record<string, { busy: boolean; result?: EngineTest; error?: string }>,
+  /** 处于失败冷却期的引擎 id */
+  cooldowns: [] as string[],
+  /** 首页翻译链路逐节点测速状态 */
+  chainTest: {
+    runId: "",
+    busy: false,
+    finished: false,
+    steps: {} as Record<string, ChainTestStep>,
+  },
 };
 
 export const cfg = () => S.view.config;
@@ -146,7 +168,20 @@ export function setRerender(fn: () => void) {
 export function refresh() {
   const key = (document.activeElement as HTMLElement | null)?.dataset?.k;
   rerender();
+  cleanupStalePopovers();
   if (key) document.querySelector<HTMLElement>(`[data-k="${key}"]`)?.focus({ preventScroll: true });
+}
+
+export function resetChainTest() {
+  S.chainTest = { runId: "", busy: false, finished: false, steps: {} };
+}
+
+export async function loadCooldowns() {
+  try {
+    S.cooldowns = await invoke<string[]>("engine_cooldowns");
+  } catch {
+    S.cooldowns = [];
+  }
 }
 
 export async function loadView() {
@@ -188,6 +223,8 @@ async function doSave(mutate: (c: Config) => void, okMsg: string, redraw: boolea
   try {
     await invoke("settings_save", { config: next });
     await loadView();
+    S.cooldowns = [];
+    resetChainTest();
     if (redraw) refresh();
     if (okMsg) toast(okMsg);
     return true;
@@ -209,61 +246,104 @@ export const langName = (tag: string) => langLabel(DISPLAY_TAG[tag] ?? tag);
 /** [标签, 名称]；名称依赖界面语言，所以每次调用时现算 */
 export const langs = (): [string, string][] => LANG_TAGS.map((tag) => [tag, langName(tag)]);
 
-// ───────────────────────── 翻译方式 ─────────────────────────
-// 配置里只有"主用引擎 + 回退顺序"。界面上的"翻译方式"由主用引擎的类型推出来：
-// 主用的是大模型（openai 兼容）就是"大模型"，否则是"翻译引擎"。
+// ───────────────────────── 翻译方式与调用链 ─────────────────────────
+// 配置里只有"主用引擎 + 回退顺序"以及"AI 启用顺序（ai_chain）"。
+// 界面上的"翻译方式"由主用引擎类型推出：主用的是 AI（openai / anthropic / gemini）即为 AI 翻译，否则为机器翻译。
 
-export const LLM_KIND = "openai";
+export const AI_KINDS = new Set(["openai", "anthropic", "gemini"]);
 
 export const kindOf = (c: Config, id: string) => (c.engines?.[id]?.type || "").trim() || id;
-export const isLLM = (c: Config, id: string) => kindOf(c, id) === LLM_KIND;
+export const isLLM = (c: Config, id: string) => AI_KINDS.has(kindOf(c, id));
 export const engineInfo = (kind: string) => S.catalog.find((e) => e.id === kind);
-export const engineLabel = (c: Config, id: string) => engineInfo(kindOf(c, id))?.name ?? id;
+export const providerLabel = (c: Config, id: string) =>
+  c.engines?.[id]?.name?.trim() || engineInfo(kindOf(c, id))?.name || id;
+export const engineLabel = providerLabel;
 
-/** 配置里的大模型引擎 id：已有 openai 类型的配置就用它，否则用 "openai" */
-export function llmId(c: Config): string {
-  return Object.keys(c.engines).find((id) => isLLM(c, id)) ?? LLM_KIND;
+/** 配置中所有的 AI 供应商实例 id */
+export function aiIds(c: Config): string[] {
+  return Object.keys(c.engines ?? {}).filter((id) => isLLM(c, id));
+}
+
+/** 已启用的 AI 供应商按顺序排列 */
+export function aiChain(c: Config): string[] {
+  const ids = aiIds(c);
+  if (!ids.length) return [];
+  const raw = c.ai_chain;
+  if (raw && raw.length > 0) {
+    return raw.map((s) => s.trim()).filter((id, i, a) => ids.includes(id) && a.indexOf(id) === i);
+  }
+  // 兼容旧配置：未写 ai_chain 时，从当前主用与回退中提取 AI 实例
+  return [c.engine, ...c.fallback]
+    .map((s) => s.trim())
+    .filter((id, i, a) => id && ids.includes(id) && a.indexOf(id) === i);
 }
 
 export type Method = "engine" | "llm";
 export const methodOf = (c: Config): Method => (isLLM(c, c.engine) ? "llm" : "engine");
 
-/** 传统引擎的尝试顺序（主用 + 回退，去掉大模型），没有就用 edge */
+/** 传统机器翻译引擎的尝试顺序（主用 + 回退，去掉 AI），没有就用 edge */
 export function engineChain(c: Config): string[] {
   const chain = [c.engine, ...c.fallback].map((s) => s.trim()).filter((id, i, a) => id && !isLLM(c, id) && a.indexOf(id) === i);
   return chain.length ? chain : ["edge"];
 }
 
-/**
- * 切换翻译方式。
- * - 切到大模型：大模型做主用，原来的传统引擎顺序整体变成回退（大模型出错时自动退回传统引擎）；
- * - 切回翻译引擎：传统引擎顺序恢复为主用 + 回退。
- */
-export function applyMethod(c: Config, m: Method) {
-  const chain = engineChain(c);
-  if (m === "llm") {
-    const id = llmId(c);
-    c.engines[id] ??= { base_url: "", api_key: "", region: "", model: "", proxy: null };
-    c.engine = id;
-    c.fallback = chain;
-  } else {
-    c.engine = chain[0];
-    c.fallback = chain.slice(1);
+/** 当前实际生效的完整调用链（与后端 Config::engine_chain 一致） */
+export function effectiveChain(c: Config): string[] {
+  const mt = engineChain(c);
+  if (methodOf(c) === "llm") {
+    const ai = aiChain(c);
+    if (ai.length) return [...ai, ...mt];
   }
+  return mt;
 }
 
-/** 大模型是否已填好必填项 */
-export function llmReady(c: Config): boolean {
-  const p = c.engines[llmId(c)];
-  return !!p && !!p.base_url?.trim() && !!p.model?.trim();
+/**
+ * 切换默认翻译方式。
+ * - 切到 AI 翻译：需要至少已启用一个 AI 供应商；将已启用的 AI 链放前面，机器翻译链放后面作后备。
+ * - 切回机器翻译：保留当前的 ai_chain，将机器翻译链恢复为主用 + 回退。
+ */
+export function applyMethod(c: Config, m: Method): boolean {
+  const mt = engineChain(c);
+  const ai = aiChain(c);
+  c.ai_chain = ai;
+  if (m === "llm") {
+    if (!ai.length) return false;
+    c.engine = ai[0];
+    c.fallback = [...ai.slice(1), ...mt];
+    return true;
+  }
+  c.engine = mt[0];
+  c.fallback = mt.slice(1);
+  return true;
 }
 
-/** 按给定顺序写回传统引擎链：翻译引擎方式下首个做主用，大模型方式下整条作为回退 */
+/** 写回机器翻译顺序：默认方式为机器翻译时直接作主链，为 AI 翻译时作后备 */
 export function setEngineChain(c: Config, ids: string[]) {
-  if (methodOf(c) === "llm") c.fallback = ids;
-  else {
-    c.engine = ids[0];
-    c.fallback = ids.slice(1);
+  if (methodOf(c) === "llm") {
+    const ai = aiChain(c);
+    c.ai_chain = ai;
+    if (ai.length) {
+      c.engine = ai[0];
+      c.fallback = [...ai.slice(1), ...ids];
+      return;
+    }
+  }
+  c.engine = ids[0];
+  c.fallback = ids.slice(1);
+}
+
+/** 写回 AI 供应商启用顺序；当前处于 AI 翻译时同步更新生效链，全部停用则切回机器翻译 */
+export function setAiChain(c: Config, ids: string[]) {
+  const mt = engineChain(c);
+  c.ai_chain = ids;
+  if (methodOf(c) === "llm") {
+    if (ids.length > 0) {
+      c.engine = ids[0];
+      c.fallback = [...ids.slice(1), ...mt];
+    } else {
+      c.engine = mt[0];
+      c.fallback = mt.slice(1);
+    }
   }
 }
 
@@ -274,10 +354,33 @@ export async function testEngine(id: string): Promise<boolean> {
   let ok = false;
   try {
     S.tests[id] = { busy: false, result: await invoke<EngineTest>("engine_test", { id }) };
+    S.cooldowns = S.cooldowns.filter((x) => x !== id);
     ok = true;
   } catch (e) {
     S.tests[id] = { busy: false, error: errText(e) };
   }
   refresh();
   return ok;
+}
+
+/** 首页链路逐节点测速 */
+export async function startChainTest() {
+  if (S.chainTest.busy) return;
+  const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  S.chainTest = { runId, busy: true, finished: false, steps: {} };
+  refresh();
+  try {
+    const steps = await invoke<ChainTestStep[]>("engine_test_chain", { runId });
+    if (S.chainTest.runId !== runId) return;
+    for (const step of steps) S.chainTest.steps[step.id] = step;
+    await loadCooldowns();
+  } catch (e) {
+    toast(errText(e), true);
+  } finally {
+    if (S.chainTest.runId === runId) {
+      S.chainTest.busy = false;
+      S.chainTest.finished = true;
+      refresh();
+    }
+  }
 }

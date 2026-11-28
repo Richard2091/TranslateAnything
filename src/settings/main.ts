@@ -2,13 +2,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { S, loadStats, loadView, refresh, setRerender, type AppVersion, type EngineInfo, type TargetStatus, type UpdateInfo } from "./state";
+import { S, loadCooldowns, loadStats, loadView, refresh, setRerender, type AppVersion, type ChainTestStep, type EngineInfo, type TargetStatus, type UpdateInfo } from "./state";
 import { errText, h } from "./ui";
 import { setNav } from "./nav";
 import { renderDashboard } from "./pages/dashboard";
 import { loadFrames, loadOcrLangs, renderOverlay } from "./pages/overlay";
 import { renderImmersive } from "./pages/immersive";
-import { renderEngines } from "./pages/engines";
+import { renderMt } from "./pages/mt";
+import { renderAi } from "./pages/ai";
 import { buildLibrary, queryLibrary } from "./pages/library";
 import { glossaryDirty, renderGlossary, resetGlossaryDraft } from "./pages/glossary";
 import { loadAutostart, renderGeneral } from "./pages/general";
@@ -17,10 +18,11 @@ import { initI18n, isZh, t } from "../i18n";
 type Page = { render: (root: HTMLElement) => void; onShow?: () => Promise<unknown> | void };
 
 const PAGES: Record<string, Page> = {
-  dashboard: { render: renderDashboard, onShow: () => Promise.all([loadFrames(), loadStats()]) },
+  dashboard: { render: renderDashboard, onShow: () => Promise.all([loadFrames(), loadStats(), loadCooldowns()]) },
   overlay: { render: renderOverlay, onShow: () => Promise.all([loadFrames(), loadOcrLangs()]) },
   immersive: { render: renderImmersive },
-  engines: { render: renderEngines },
+  mt: { render: renderMt, onShow: () => loadCooldowns() },
+  ai: { render: renderAi, onShow: () => loadCooldowns() },
   library: { render: buildLibrary, onShow: queryLibrary },
   glossary: { render: renderGlossary },
   general: { render: renderGeneral },
@@ -166,6 +168,7 @@ setInterval(async () => {
       invoke<EngineInfo[]>("engine_catalog"),
       invoke<AppVersion>("app_version"),
       invoke<UpdateInfo | null>("update_state"),
+      loadCooldowns(),
     ]);
     // 从托盘"发现新版本"打开时直接到常规页
     const goto = await invoke<string | null>("settings_take_goto").catch(() => null);
@@ -196,5 +199,11 @@ setInterval(async () => {
   await listen<TargetStatus[]>("immersive-status", (e) => {
     S.statuses = e.payload;
     if (current === "dashboard" || current === "immersive") backgroundRender();
+  });
+  await listen<ChainTestStep>("chain-test-step", (e) => {
+    const step = e.payload;
+    if (S.chainTest.runId !== step.run_id) return;
+    S.chainTest.steps[step.id] = step;
+    if (current === "dashboard") backgroundRender();
   });
 })();

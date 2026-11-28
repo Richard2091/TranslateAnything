@@ -136,6 +136,8 @@ pub fn run() {
             settings::open_settings_window,
             settings::store_stats,
             settings::engine_test,
+            settings::engine_test_chain,
+            settings::engine_cooldowns,
             settings::llm_models,
             settings::pick_exe,
             settings::overlay_start,

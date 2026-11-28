@@ -1,6 +1,6 @@
 // 译文库：搜索、改译、删除、清空
 import { invoke } from "@tauri-apps/api/core";
-import { cfg, engineInfo, loadStats } from "../state";
+import { cfg, loadStats, providerLabel } from "../state";
 import { fmtNum, t } from "../../i18n";
 import { confirmDialog, emptyState, errText, h, icon, pageHead, relTime, toast } from "../ui";
 
@@ -112,7 +112,7 @@ function renderTable() {
         { class: r.manual ? "manual" : "" },
         h("td", { class: "src-text" }, r.source),
         h("td", {}, input),
-        h("td", {}, h("span", { class: `tag${r.manual ? " accent" : ""}` }, r.manual ? t("library.manual") : engineInfo(r.engine)?.name ?? r.engine)),
+        h("td", {}, h("span", { class: `tag${r.manual ? " accent" : ""}` }, r.manual ? t("library.manual") : providerLabel(cfg(), r.engine))),
         h("td", { class: "small muted num" }, fmtNum(r.hits)),
         h("td", { class: "small muted" }, relTime(r.used_at)),
         h(

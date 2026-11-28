@@ -2110,6 +2110,11 @@ tr.manual td:first-child {
   color: var(--accent-text);
 }
 
+.tag.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
 .empty {
   text-align: center;
   color: var(--muted);
@@ -2454,4 +2459,305 @@ input.hotkey-input.recording {
 
 input.hotkey-input.recording::placeholder {
   color: var(--accent-text);
+}
+/* ───── 通栏链路卡片、子页状态横幅、悬停详情浮层与 AI 预设弹窗 ───── */
+.tile-wide {
+  grid-column: 1 / -1;
+  min-height: auto;
+}
+
+.chain-head {
+  flex-wrap: wrap;
+}
+
+.chain-flow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+}
+
+.chain-arrow {
+  display: inline-grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.chain-arrow svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chain-divider {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  border: 1px dashed var(--line-strong);
+}
+
+.chain-node {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: default;
+  transition: border-color 0.15s, background 0.15s, color 0.15s, opacity 0.15s;
+}
+
+.chain-node:hover,
+.chain-node:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.chain-node.testing {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.chain-node.ok {
+  border-color: color-mix(in srgb, var(--ok) 45%, transparent);
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.chain-node.fail {
+  border-color: color-mix(in srgb, var(--bad) 45%, transparent);
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.chain-node.skipped {
+  opacity: 0.55;
+  color: var(--muted);
+  background: var(--hover);
+  border-color: var(--line);
+}
+
+.chain-dur {
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.92;
+}
+
+.chain-spin {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.7px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 0.75s linear infinite;
+}
+
+.chain-cool-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--warn-dot);
+}
+
+.proxy-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 12px;
+  font-size: 12.5px;
+}
+
+.proxy-summary b {
+  font-weight: 500;
+  min-width: 0;
+}
+
+.status-banner {
+  margin-bottom: 14px;
+}
+
+.status-banner.active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 55%, var(--panel));
+}
+
+.status-banner h3 {
+  font-size: 14px;
+  margin: 0;
+}
+
+.status-banner .desc {
+  margin-top: 2px;
+}
+
+.hover-pop {
+  position: fixed;
+  z-index: 40;
+  min-width: 190px;
+  max-width: 340px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  box-shadow: var(--shadow-lg);
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text);
+  animation: dd-in 0.14s var(--ease-out);
+  transform-origin: top left;
+}
+
+.hover-pop.up {
+  transform-origin: bottom left;
+  animation-name: dd-in-up;
+}
+
+.hover-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.hover-pop-head b {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.hover-pop-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--idle-dot);
+}
+
+.hover-pop-dot.accent {
+  background: var(--accent);
+}
+
+.hover-pop-dot.ok {
+  background: var(--ok-dot);
+}
+
+.hover-pop-dot.warn {
+  background: var(--warn-dot);
+}
+
+.hover-pop-dot.bad {
+  background: var(--bad-dot);
+}
+
+.hover-pop-meta {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+.hover-pop-body {
+  margin-top: 8px;
+  padding: 7px 9px;
+  border-radius: 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.hover-pop-body.ok {
+  background: var(--ok-soft);
+  border-color: color-mix(in srgb, var(--ok) 25%, transparent);
+  color: var(--ok);
+}
+
+.hover-pop-body.bad {
+  background: var(--bad-soft);
+  border-color: color-mix(in srgb, var(--bad) 25%, transparent);
+  color: var(--bad);
+}
+
+.preset-group + .preset-group {
+  margin-top: 14px;
+}
+
+.preset-group-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+
+.preset-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.preset-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.14s, background 0.14s;
+}
+
+.preset-item:hover {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.preset-name {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.preset-sub {
+  font-size: 11.5px;
+  color: var(--muted);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-quick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  padding-bottom: 8px;
+}
+
+h2.section .spacer {
+  flex: 1;
 }

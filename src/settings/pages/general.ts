@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { S, cfg, langs, loadStats, loadView, refresh, saveConfig, type UpdateInfo } from "../state";
 import { confirmDialog, dropdown, errText, fileSize, h, icon, pageHead, section, switchEl, toast, type IconName } from "../ui";
 import { t, uiLocales } from "../../i18n";
-import { proxyField } from "./engines";
+import { proxyField } from "./engineShared";
 
 let moving = false;
 
@@ -277,7 +277,7 @@ export function renderGeneral(root: HTMLElement) {
         h("button", { class: "btn ghost sm", onclick: () => reveal("store") }, icon("folder"), t("general.openLocation")),
       ),
     ),
-    h("p", { class: "desc", style: "margin:8px 2px 0" }, t("general.enginesHint", { page: t("nav.engines") })),
+    h("p", { class: "desc", style: "margin:8px 2px 0" }, t("general.enginesHint", { mt: t("nav.mt"), ai: t("nav.ai") })),
     section(t("general.update.title")),
     updateCard(row),
   );

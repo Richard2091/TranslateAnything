@@ -2,11 +2,14 @@
 //!
 //! 引擎清单见 [`CATALOG`]（设置界面也从这里读取可选引擎和所需字段）。
 
+mod anthropic;
 mod deepl;
 mod deeplx;
 mod edge;
+mod gemini;
 mod google;
 mod google_free;
+mod llm;
 mod microsoft;
 mod openai;
 
@@ -16,8 +19,8 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Debug)]
 pub enum TranslateError {
@@ -165,6 +168,24 @@ pub const CATALOG: &[EngineInfo] = &[
         default_base_url: "",
         note: "engine.openai.note",
     },
+    EngineInfo {
+        id: "anthropic",
+        name: "engine.anthropic.name",
+        needs_key: true,
+        official: true,
+        fields: &["base_url", "api_key", "model", "proxy"],
+        default_base_url: anthropic::DEFAULT_BASE,
+        note: "engine.anthropic.note",
+    },
+    EngineInfo {
+        id: "gemini",
+        name: "engine.gemini.name",
+        needs_key: true,
+        official: true,
+        fields: &["base_url", "api_key", "model", "proxy"],
+        default_base_url: gemini::DEFAULT_BASE,
+        note: "engine.gemini.note",
+    },
 ];
 
 /// 按引擎类型创建 Provider
@@ -178,6 +199,8 @@ pub fn create(kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, T
         "deeplx" => Box::new(deeplx::DeepLX::new(cfg)?),
         "google" => Box::new(google::Google::new(cfg)?),
         "openai" => Box::new(openai::OpenAICompatible::new(cfg)?),
+        "anthropic" => Box::new(anthropic::Anthropic::new(cfg)?),
+        "gemini" => Box::new(gemini::Gemini::new(cfg)?),
         other => {
             let ids: Vec<_> = CATALOG.iter().map(|e| e.id).collect();
             return Err(TranslateError::Config(t!(
@@ -192,6 +215,15 @@ pub fn create(kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, T
 /// 引擎的显示名（按当前界面语言）；不在清单里的原样返回
 fn engine_name(kind: &str) -> String {
     CATALOG.iter().find(|e| e.id == kind).map_or_else(|| kind.to_string(), |e| t!(e.name))
+}
+
+/// 引擎实例的显示名：优先使用用户配置的名称，留空时回退到类型名
+pub fn provider_display_name(id: &str, provider: &ProviderConfig) -> String {
+    let custom = provider.name.trim();
+    if !custom.is_empty() {
+        return custom.to_string();
+    }
+    engine_name(&provider.kind_or(id))
 }
 
 /// 本地缓存全部命中时返回的"引擎名"（按当前界面语言）
@@ -231,8 +263,7 @@ pub async fn translate_batch_with_fallback(
     texts: &[String],
     who: &str,
 ) -> Result<(Vec<String>, String), String> {
-    use crate::timing::ms;
-    use std::time::Instant;
+    use crate::timing::secs;
     let start = Instant::now();
     let lang = cfg.target_lang.as_str();
     let terms = glossary(cfg);
@@ -258,18 +289,18 @@ pub async fn translate_batch_with_fallback(
         tlog!(
             "{who} 翻译 {} 条：术语表命中 {glossary_hits} · 译文库 {} 命中 {store_hits} · 无需请求引擎 · 共 {}",
             texts.len(),
-            ms(store_time),
-            ms(start.elapsed())
+            secs(store_time),
+            secs(start.elapsed())
         );
         cache_engine()
     } else {
         let t = Instant::now();
         let result = translate_by_engines(cfg, &missing).await;
         let api_time = t.elapsed();
-        let (translated, kind) = match result {
+        let (translated, id, display_name) = match result {
             Ok(v) => v,
             Err(e) => {
-                tlog!("{who} 翻译 {} 条：引擎全部失败，耗时 {}", missing.len(), ms(api_time));
+                tlog!("{who} 翻译 {} 条：引擎全部失败，耗时 {}", missing.len(), secs(api_time));
                 return Err(e);
             }
         };
@@ -277,31 +308,86 @@ pub async fn translate_batch_with_fallback(
         let pairs: Vec<(String, String)> = missing.into_iter().zip(translated).collect();
         let t = Instant::now();
         if cfg.persist_cache {
-            // 译文库里记引擎 id（与界面语言无关），显示时再换成当前语言的名称
-            crate::store::put_many(lang, &pairs, &kind);
+            // 译文库里记引擎实例 id（与界面语言无关，也能区分多个 AI 供应商）
+            crate::store::put_many(lang, &pairs, &id);
         }
         let save_time = t.elapsed();
         found.extend(pairs);
         tlog!(
-            "{who} 翻译 {} 条：术语表命中 {glossary_hits} · 译文库 {} 命中 {store_hits} · 引擎【{kind}】{} 条 {} · 写库 {} · 共 {}",
+            "{who} 翻译 {} 条：术语表命中 {glossary_hits} · 译文库 {} 命中 {store_hits} · 引擎【{display_name}】{} 条 {} · 写库 {} · 共 {}",
             texts.len(),
-            ms(store_time),
+            secs(store_time),
             n,
-            ms(api_time),
-            ms(save_time),
-            ms(start.elapsed())
+            secs(api_time),
+            secs(save_time),
+            secs(start.elapsed())
         );
-        engine_name(&kind)
+        display_name
     };
     Ok((texts.iter().map(|t| found[t].clone()).collect(), engine))
 }
 
-/// 按配置的主引擎 + 回退顺序依次尝试批量翻译（不查缓存），返回（译文，实际使用的引擎类型 id）
-async fn translate_by_engines(cfg: &Config, texts: &[String]) -> Result<(Vec<String>, String), String> {
+// ───────────────────────── 单项失败冷却 ─────────────────────────
+
+const COOLDOWN_DURATION: Duration = Duration::from_secs(180);
+
+static COOLDOWNS: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn cooldown_map() -> &'static Mutex<HashMap<String, Instant>> {
+    COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn is_cooling_at(map: &mut HashMap<String, Instant>, id: &str, now: Instant) -> bool {
+    let Some(&until) = map.get(id) else {
+        return false;
+    };
+    if now < until {
+        true
+    } else {
+        map.remove(id);
+        false
+    }
+}
+
+pub fn is_cooling(id: &str) -> bool {
+    let mut map = cooldown_map().lock().unwrap();
+    is_cooling_at(&mut map, id, Instant::now())
+}
+
+pub fn mark_cooldown(id: &str) {
+    let mut map = cooldown_map().lock().unwrap();
+    map.insert(id.to_string(), Instant::now() + COOLDOWN_DURATION);
+}
+
+pub fn clear_cooldown(id: &str) {
+    cooldown_map().lock().unwrap().remove(id);
+}
+
+pub fn clear_all_cooldowns() {
+    cooldown_map().lock().unwrap().clear();
+}
+
+pub fn cooling_ids() -> Vec<String> {
+    let now = Instant::now();
+    let mut map = cooldown_map().lock().unwrap();
+    map.retain(|_, &mut until| now < until);
+    let mut ids: Vec<String> = map.keys().cloned().collect();
+    ids.sort();
+    ids
+}
+
+/// 按配置的主引擎 + 回退顺序依次尝试批量翻译（不查缓存），返回（译文，引擎 id，显示名）
+async fn translate_by_engines(cfg: &Config, texts: &[String]) -> Result<(Vec<String>, String, String), String> {
+    let chain = cfg.engine_chain();
+    let active: Vec<(String, ProviderConfig)> = chain.iter().filter(|(id, _)| !is_cooling(id)).cloned().collect();
+    // 全部处于冷却时仍按完整顺序尝试，避免可用节点全部被跳过
+    let candidates = if active.is_empty() { chain } else { active };
+
     let mut errors = Vec::new();
-    for (id, provider) in cfg.engine_chain() {
+    for (id, provider) in candidates {
         let kind = provider.kind_or(&id);
-        let start = std::time::Instant::now();
+        let display_name = provider_display_name(&id, &provider);
+        let start = Instant::now();
         let (engine, result) = match create(&kind, &provider) {
             Ok(t) => {
                 let r = t.translate_batch(texts, &cfg.target_lang).await;
@@ -310,17 +396,24 @@ async fn translate_by_engines(cfg: &Config, texts: &[String]) -> Result<(Vec<Str
             Err(e) => (None, Err(e)),
         };
         if !matches!(&result, Ok(t) if t.len() == texts.len()) {
-            tlog!("引擎【{kind}】失败，改用下一个，已耗时 {}", crate::timing::ms(start.elapsed()));
+            tlog!("引擎【{display_name}】失败，改用下一个，已耗时 {}", crate::timing::secs(start.elapsed()));
         }
         match result {
             Ok(mut t) if t.len() == texts.len() => {
+                clear_cooldown(&id);
                 if let Some(e) = &engine {
                     retry_misdetected(e.as_ref(), texts, &mut t, &cfg.target_lang).await;
                 }
-                return Ok((t, kind));
+                return Ok((t, id, display_name));
             }
-            Ok(_) => errors.push(t!("err.engine.count_mismatch", name = engine_name(&kind))),
-            Err(e) => errors.push(t!("err.engine.prefixed", name = engine_name(&kind), e = e)),
+            Ok(_) => {
+                mark_cooldown(&id);
+                errors.push(t!("err.engine.count_mismatch", name = display_name));
+            }
+            Err(e) => {
+                mark_cooldown(&id);
+                errors.push(t!("err.engine.prefixed", name = display_name, e = e));
+            }
         }
     }
     Err(errors.join("\n"))
@@ -374,8 +467,13 @@ async fn retry_misdetected(engine: &dyn Translator, texts: &[String], out: &mut 
 }
 
 /// 大模型接口可用的模型 id（已排序去重）
-pub async fn list_models(cfg: &ProviderConfig) -> Result<Vec<String>, String> {
-    openai::list_models(cfg).await.map_err(|e| e.to_string())
+pub async fn list_models(kind: &str, cfg: &ProviderConfig) -> Result<Vec<String>, String> {
+    let res = match kind {
+        "anthropic" => anthropic::list_models(cfg).await,
+        "gemini" => gemini::list_models(cfg).await,
+        _ => openai::list_models(cfg).await,
+    };
+    res.map_err(|e| e.to_string())
 }
 
 /// 引擎测试结果（设置窗口"测试"按钮）
@@ -389,19 +487,100 @@ pub struct EngineTest {
     pub ms: u64,
 }
 
+const TEST_SAMPLE: &str = "Hello! Screen text, translated anywhere.";
+
 /// 用一句固定的英文测试某个已配置的引擎（不查缓存、不写译文库、不回退）
 pub async fn test_engine(cfg: &Config, id: &str) -> Result<EngineTest, String> {
-    const SAMPLE: &str = "Hello! Screen text, translated anywhere.";
     let provider = cfg.provider(id);
     let kind = provider.kind_or(id);
-    let name = engine_name(&kind);
-    let start = std::time::Instant::now();
+    let name = provider_display_name(id, &provider);
+    let start = Instant::now();
     let text = create(&kind, &provider)
         .map_err(|e| e.to_string())?
-        .translate(SAMPLE, &cfg.target_lang)
+        .translate(TEST_SAMPLE, &cfg.target_lang)
         .await
         .map_err(|e| e.to_string())?;
-    Ok(EngineTest { engine: name, source: SAMPLE.into(), text, ms: start.elapsed().as_millis() as u64 })
+    clear_cooldown(id);
+    Ok(EngineTest {
+        engine: name,
+        source: TEST_SAMPLE.into(),
+        text,
+        ms: start.elapsed().as_millis() as u64,
+    })
+}
+
+/// 首页链路测速单步结果（随探测逐个发出，也作为完整测速返回值）
+#[derive(Debug, Clone, Serialize)]
+pub struct ChainTestStep {
+    pub run_id: String,
+    pub id: String,
+    pub name: String,
+    /// `testing` | `ok` | `error`
+    pub status: String,
+    pub ms: Option<u64>,
+    pub source: Option<String>,
+    pub text: Option<String>,
+    pub error: Option<String>,
+}
+
+/// 按当前生效调用链逐节点测速（忽略冷却、不查译文库、不写库；首个节点成功即停止）
+pub async fn test_chain<F: Fn(&ChainTestStep)>(cfg: &Config, run_id: &str, on_step: F) -> Vec<ChainTestStep> {
+    let mut steps = Vec::new();
+    for (id, provider) in cfg.engine_chain() {
+        let kind = provider.kind_or(&id);
+        let name = provider_display_name(&id, &provider);
+        let testing = ChainTestStep {
+            run_id: run_id.to_string(),
+            id: id.clone(),
+            name: name.clone(),
+            status: "testing".into(),
+            ms: None,
+            source: None,
+            text: None,
+            error: None,
+        };
+        on_step(&testing);
+
+        let start = Instant::now();
+        let res = match create(&kind, &provider) {
+            Ok(t) => t.translate(TEST_SAMPLE, &cfg.target_lang).await.map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        let elapsed_ms = start.elapsed().as_millis() as u64;
+        match res {
+            Ok(text) => {
+                clear_cooldown(&id);
+                let step = ChainTestStep {
+                    run_id: run_id.to_string(),
+                    id,
+                    name,
+                    status: "ok".into(),
+                    ms: Some(elapsed_ms),
+                    source: Some(TEST_SAMPLE.into()),
+                    text: Some(text),
+                    error: None,
+                };
+                on_step(&step);
+                steps.push(step);
+                break;
+            }
+            Err(err) => {
+                let step = ChainTestStep {
+                    run_id: run_id.to_string(),
+                    id,
+                    name,
+                    status: "error".into(),
+                    ms: Some(elapsed_ms),
+                    source: None,
+                    text: None,
+                    error: Some(err),
+                };
+                on_step(&step);
+                steps.push(step);
+            }
+        }
+    }
+    steps
 }
 
 // ───────────────────────── 公共工具 ─────────────────────────
@@ -614,9 +793,29 @@ mod tests {
             proxy: Some("http://127.0.0.1:7897".into()),
             ..Default::default()
         };
-        let ids = list_models(&cfg).await.unwrap();
+        let ids = list_models("openai", &cfg).await.unwrap();
         println!("{} 个模型，如 {:?}", ids.len(), &ids[..3.min(ids.len())]);
         assert!(!ids.is_empty());
+    }
+
+    #[test]
+    fn 供应商名称优先自定义() {
+        let mut p = ProviderConfig::default();
+        p.kind = "anthropic".into();
+        assert_eq!(provider_display_name("ai_1", &p), engine_name("anthropic"));
+        p.name = "  Claude 主力  ".into();
+        assert_eq!(provider_display_name("ai_1", &p), "Claude 主力");
+    }
+
+    #[test]
+    fn 单项冷却判定与清理() {
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        map.insert("a".to_string(), now + Duration::from_secs(60));
+        map.insert("expired".to_string(), now - Duration::from_secs(1));
+        assert!(is_cooling_at(&mut map, "a", now));
+        assert!(!is_cooling_at(&mut map, "expired", now));
+        assert!(!map.contains_key("expired"));
     }
 
     #[test]
