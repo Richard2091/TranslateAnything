@@ -32,6 +32,15 @@ pub fn monitor_at(x: i32, y: i32) -> Result<MonitorRect, String> {
     })
 }
 
+/// 截取区域下的窗口信息（按 Z 序自顶向下，坐标相对本次截图左上角）
+#[derive(Debug, Clone)]
+pub struct WindowLayer {
+    pub rect: (i32, i32, i32, i32),
+    pub app_id: String,
+    pub app_name: String,
+    pub title: String,
+}
+
 /// 一次截取的结果
 pub struct Shot {
     pub image: RgbaImage,
@@ -40,6 +49,8 @@ pub struct Shot {
     pub oy: i32,
     /// 画面对应的时刻（PrintWindow 为开始绘制时，WGC 为 DWM 合成该帧时）
     pub at: Instant,
+    /// 框下涉及的窗口列表（用于悬浮窗按应用隔离与过滤）
+    pub windows: Vec<WindowLayer>,
     /// 是否来自 WGC
     #[cfg_attr(not(test), allow(dead_code))]
     pub wgc: bool,
@@ -52,16 +63,47 @@ pub struct Capturer {
     wgc: Option<crate::wgc::WindowCapture>,
     /// 建立 WGC 会话失败过的窗口，不再重试
     failed: Option<isize>,
+    /// 窗口句柄 → (app_id, app_name) 的短缓存，避免每帧查进程
+    app_cache: std::collections::HashMap<isize, (String, String)>,
 }
 
 impl Capturer {
     /// `on_frame`：WGC 有新帧时调用，用来立即唤醒跟踪循环
     pub fn new(on_frame: Arc<dyn Fn() + Send + Sync>) -> Self {
-        Self { on_frame, wgc: None, failed: None }
+        Self {
+            on_frame,
+            wgc: None,
+            failed: None,
+            app_cache: std::collections::HashMap::new(),
+        }
+    }
+
+    fn describe_layers(&mut self, layers: &[(HWND, RECT)], x: i32, y: i32) -> Vec<WindowLayer> {
+        if self.app_cache.len() > 256 {
+            self.app_cache.clear();
+        }
+        layers
+            .iter()
+            .map(|&(hwnd, r)| {
+                let key = hwnd.0 as isize;
+                let (app_id, app_name) = self
+                    .app_cache
+                    .entry(key)
+                    .or_insert_with(|| resolve_hwnd_app(hwnd))
+                    .clone();
+                WindowLayer {
+                    rect: (r.left - x, r.top - y, r.right - r.left, r.bottom - r.top),
+                    app_id,
+                    app_name,
+                    title: window_title(hwnd),
+                }
+            })
+            .collect()
     }
 
     pub fn grab(&mut self, x: i32, y: i32, w: u32, h: u32) -> Result<Shot, String> {
         let layers = layers_under(x, y, w, h)?;
+        let windows = self.describe_layers(&layers, x, y);
         if layers.len() == 1 && crate::wgc::available() {
             let hwnd = layers[0].0.0 as isize;
             if self.wgc.as_ref().is_some_and(|c| c.hwnd != hwnd) {
@@ -76,15 +118,82 @@ impl Capturer {
             if let Some(c) = &mut self.wgc {
                 // 还没有帧、区域超出窗口可见边界等：这一次先用 PrintWindow
                 if let Ok(Some((image, at))) = c.grab(x, y, w, h) {
-                    return Ok(Shot { image, ox: 0, oy: 0, at, wgc: true });
+                    return Ok(Shot { image, ox: 0, oy: 0, at, windows, wgc: true });
                 }
             }
         }
         // 框下暂时多出别的窗口（菜单、弹窗）时保留 WGC 会话，回来后接着用
         let at = Instant::now();
         let image = print_layers(&layers, x, y, w, h)?;
-        Ok(Shot { image, ox: 0, oy: 0, at, wgc: false })
+        Ok(Shot { image, ox: 0, oy: 0, at, windows, wgc: false })
     }
+}
+
+/// 解析窗口句柄对应的应用标识与友好名称；若为 UWP 宿主（ApplicationFrameHost.exe）则下钻子窗口
+fn resolve_hwnd_app(hwnd: HWND) -> (String, String) {
+    use windows::Win32::Foundation::LPARAM;
+    use windows::Win32::UI::WindowsAndMessaging::{EnumChildWindows, GetWindowThreadProcessId};
+    use windows::core::BOOL;
+
+    let mut pid = 0u32;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    }
+    let mut exe = if pid != 0 {
+        crate::immersive::procs::exe_path(pid)
+    } else {
+        None
+    };
+
+    let is_uwp_host = exe
+        .as_ref()
+        .and_then(|p| p.file_name())
+        .is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case("ApplicationFrameHost.exe"));
+    if is_uwp_host {
+        struct Search {
+            host_pid: u32,
+            found: Option<std::path::PathBuf>,
+        }
+        unsafe extern "system" fn each_child(child: HWND, lp: LPARAM) -> BOOL {
+            let s = unsafe { &mut *(lp.0 as *mut Search) };
+            let mut cpid = 0u32;
+            unsafe { GetWindowThreadProcessId(child, Some(&mut cpid)) };
+            if cpid != 0 && cpid != s.host_pid {
+                if let Some(p) = crate::immersive::procs::exe_path(cpid) {
+                    s.found = Some(p);
+                    return false.into();
+                }
+            }
+            true.into()
+        }
+        let mut s = Search { host_pid: pid, found: None };
+        unsafe {
+            let _ = EnumChildWindows(Some(hwnd), Some(each_child), LPARAM(&mut s as *mut Search as isize));
+        }
+        if let Some(real_exe) = s.found {
+            exe = Some(real_exe);
+        }
+    }
+
+    let Some(path) = exe else {
+        return (String::new(), String::new());
+    };
+    let app_id = crate::config::normalize_app_id(&path.to_string_lossy());
+    let app_name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| app_id.clone());
+    (app_id, app_name)
+}
+
+fn window_title(hwnd: HWND) -> String {
+    use windows::Win32::UI::WindowsAndMessaging::GetWindowTextW;
+    let mut buf = [0u16; 128];
+    let n = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if n <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..n as usize]).trim().chars().take(80).collect()
 }
 
 /// 截取某区域内"本程序窗口之下"的画面（只用 `PrintWindow`）。

@@ -50,6 +50,8 @@ pub struct Config {
     /// 自定义术语表：原文 → 译文，整条精确匹配，优先于内置术语表、译文库和引擎。
     /// 译文写成与原文相同即"保持原样不翻"
     pub glossary: BTreeMap<String, String>,
+    /// 翻译过滤规则（全局 + 按应用）
+    pub filter: FilterConfig,
     /// 沉浸模式：直接改写目标应用界面里的文字（目前支持 Electron/Chromium 内核应用）
     pub immersive: ImmersiveConfig,
     /// 检查更新
@@ -96,6 +98,36 @@ pub struct ProviderConfig {
     /// `system` = 跟随系统环境变量；其他 = 代理地址。
     /// 旧版里留空表示直连，而全局代理默认也是直连，所以旧配置行为不变、无需迁移
     pub proxy: Option<String>,
+    /// 最大并发请求数（留空按引擎类型默认：AI 引擎 2，传统引擎 4）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrency: Option<u8>,
+}
+
+/// 翻译过滤规则集（不翻译词表 / 正则 / 强制翻译）
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilterRuleSet {
+    pub keep_terms: Vec<String>,
+    pub keep_patterns: Vec<String>,
+    pub force_translate: Vec<String>,
+}
+
+impl FilterRuleSet {
+    fn extend_from(&mut self, other: &FilterRuleSet) {
+        self.keep_terms.extend(other.keep_terms.iter().cloned());
+        self.keep_patterns.extend(other.keep_patterns.iter().cloned());
+        self.force_translate.extend(other.force_translate.iter().cloned());
+    }
+}
+
+/// 翻译过滤总配置（全局规则 + 按应用覆盖）
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilterConfig {
+    pub keep_terms: Vec<String>,
+    pub keep_patterns: Vec<String>,
+    pub force_translate: Vec<String>,
+    pub apps: BTreeMap<String, FilterRuleSet>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -128,6 +160,8 @@ pub struct ImmersiveTarget {
     pub skip_selectors: Vec<String>,
     /// 用户直接打开应用（没带调试端口）时，自动重启成沉浸模式
     pub auto_relaunch: bool,
+    /// 该应用的过滤规则（与全局过滤规则合并生效）
+    pub filter: FilterRuleSet,
 }
 
 impl Default for ImmersiveTarget {
@@ -141,6 +175,7 @@ impl Default for ImmersiveTarget {
             url_prefixes: Vec::new(),
             skip_selectors: Vec::new(),
             auto_relaunch: true,
+            filter: FilterRuleSet::default(),
         }
     }
 }
@@ -161,6 +196,27 @@ impl ProviderConfig {
         let k = self.kind.trim();
         if k.is_empty() { id.to_string() } else { k.to_string() }
     }
+
+    /// 实际使用的并发上限（AI 引擎默认 2，传统引擎默认 4）
+    pub fn effective_concurrency(&self, kind: &str) -> usize {
+        self.concurrency
+            .map(|c| c.clamp(1, 16) as usize)
+            .unwrap_or(if matches!(kind, "openai" | "anthropic" | "gemini") { 2 } else { 4 })
+    }
+}
+
+/// 统一规范化应用标识：取路径最后一段（如可执行文件名）并转小写
+pub fn normalize_app_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .to_lowercase()
 }
 
 impl Default for Config {
@@ -182,6 +238,7 @@ impl Default for Config {
             store_dir: String::new(),
             builtin_glossary: true,
             glossary: BTreeMap::new(),
+            filter: FilterConfig::default(),
             immersive: ImmersiveConfig::default(),
             update: UpdateConfig::default(),
             provider: None,
@@ -226,6 +283,31 @@ impl Config {
             chain.push(("edge".into(), self.provider("edge")));
         }
         chain
+    }
+
+    /// 合并全局与指定应用生效的过滤规则
+    pub fn effective_filter(&self, app_id: Option<&str>) -> FilterRuleSet {
+        let mut out = FilterRuleSet {
+            keep_terms: self.filter.keep_terms.clone(),
+            keep_patterns: self.filter.keep_patterns.clone(),
+            force_translate: self.filter.force_translate.clone(),
+        };
+        let norm = app_id.map(normalize_app_id).unwrap_or_default();
+        if !norm.is_empty() {
+            for (k, rules) in &self.filter.apps {
+                if normalize_app_id(k) == norm {
+                    out.extend_from(rules);
+                }
+            }
+            for target in &self.immersive.targets {
+                let exe_id = normalize_app_id(&target.exe);
+                let name_id = normalize_app_id(&target.name);
+                if (!exe_id.is_empty() && exe_id == norm) || (!name_id.is_empty() && name_id == norm) {
+                    out.extend_from(&target.filter);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -353,6 +435,25 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     if cfg.target_lang.trim().is_empty() {
         return Err(t!("err.config.target_lang_empty"));
     }
+    let check_patterns = |patterns: &[String]| -> Result<(), String> {
+        for p in patterns {
+            let p = p.trim();
+            if p.is_empty() {
+                continue;
+            }
+            if let Err(e) = regex::Regex::new(p) {
+                return Err(t!("err.config.bad_regex", pattern = p, e = e));
+            }
+        }
+        Ok(())
+    };
+    check_patterns(&cfg.filter.keep_patterns)?;
+    for rules in cfg.filter.apps.values() {
+        check_patterns(&rules.keep_patterns)?;
+    }
+    for t in &cfg.immersive.targets {
+        check_patterns(&t.filter.keep_patterns)?;
+    }
     Ok(())
 }
 
@@ -447,5 +548,42 @@ mod tests {
         assert_eq!(cfg.ai_chain, ["ai_1", "ai_2"]);
         assert_eq!(cfg.engines["ai_1"].name, "DeepSeek");
         assert_eq!(cfg.engines["ai_2"].kind, "anthropic");
+    }
+
+    #[test]
+    fn 过滤规则合并与正则校验() {
+        let cfg: Config = serde_json::from_str(
+            r#"{
+                "filter": {
+                    "keep_terms": ["Claude"],
+                    "keep_patterns": ["^v\\d+$"],
+                    "force_translate": ["Step 1"],
+                    "apps": {
+                        "Code.exe": { "keep_terms": ["Terminal"], "keep_patterns": ["^--"] }
+                    }
+                },
+                "immersive": {
+                    "targets": [
+                        { "name": "VS Code", "exe": "C:\\Program Files\\Code.exe", "port": 39222, "filter": { "force_translate": ["Run"] } }
+                    ]
+                },
+                "engines": { "openai": { "concurrency": 3 }, "edge": {} }
+            }"#,
+        )
+        .unwrap();
+        assert!(validate(&cfg).is_ok());
+        assert_eq!(normalize_app_id(r"C:\Program Files\Code.exe"), "code.exe");
+        let rules = cfg.effective_filter(Some("CODE.EXE"));
+        assert_eq!(rules.keep_terms, ["Claude", "Terminal"]);
+        assert_eq!(rules.keep_patterns, ["^v\\d+$", "^--"]);
+        assert_eq!(rules.force_translate, ["Step 1", "Run"]);
+        assert_eq!(cfg.provider("openai").effective_concurrency("openai"), 3);
+        assert_eq!(cfg.provider("default_ai").effective_concurrency("openai"), 2);
+        assert_eq!(cfg.provider("default_anth").effective_concurrency("anthropic"), 2);
+        assert_eq!(cfg.provider("edge").effective_concurrency("edge"), 4);
+
+        let mut bad = cfg.clone();
+        bad.filter.keep_patterns.push("[unclosed".into());
+        assert!(validate(&bad).is_err());
     }
 }

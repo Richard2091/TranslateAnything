@@ -15,6 +15,7 @@
 - **沉浸模式与管理界面**（2026-11-18）：译文本地库 `store.rs`、术语表 `translate/glossary.json`、Electron/Chromium 通道 `immersive/`（运行器管理、身份校验、热更新）、托盘 `tray.rs`、设置窗口 `settings.rs` + `src/settings/`（概览仪表盘、悬浮窗、沉浸模式、翻译引擎与大模型、译文库、术语表、常规）。
 - **Windows 自启动**：设置 → 常规可开启登录后托盘启动（默认关，便携模式不可用）。沉浸模式的按应用自动重启先请求正常退出，超时交给用户手动处理。
 - **2026-11-19**：悬浮窗固定区域不漂移（逐块判断钉住，见技术方案"固定区域不漂移"）；设置 → 常规新增"版本与更新"（`update.rs`，读 GitHub Releases）；大模型引擎改为批量请求，修 DeepSeek 等接口逐条请求过慢、思考内容、鉴权提示。
+- **2026-11-28**：统一翻译过滤 `filter.rs`（用户规则 → 代码/结构化文本 → 语种识别，带原因诊断）；引擎并发限流、在途去重、429 退避 `translate/limiter.rs`；大模型带轻量上下文 + 结构化输出；译文库短词按应用隔离、长句全局复用，悬浮窗识别所属程序；设置页新增过滤规则页、译文库按软件筛选/清空。
 - **发布**（2026-11-18）：`.github/workflows/release.yml`，推 `v*` 标签自动打 Windows x64 / ARM64 并建草稿 Release，另附便携版 zip（程序旁有 `portable` 文件即便携模式，数据放 `<程序目录>\data`，见 `config::portable_dir`）。macOS / Linux 未适配，方案见技术方案“多平台打包与发布”。项目内署名统一用 `Richard` / `Richard2091`，不写真实姓名。
 - 自测设置窗口：`cargo build --features tauri/custom-protocol`（嵌入 dist，不依赖 1420 端口的开发服务器），以 `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=<端口>` 和 `--settings` 参数启动，就能通过 CDP 截图和调用命令；`--frame=x,y,w,h`（物理像素）直接在该处打开翻译框。自测实例建议在 exe 旁放 `portable` 文件，免得写进自己的译文库。
 

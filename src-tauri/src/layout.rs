@@ -104,10 +104,27 @@ pub struct Block {
     /// `#rrggbb`
     pub bg: String,
     pub fg: String,
+    /// 是否为标题片段（仅后端传上下文用，不序列化给前端）
+    #[serde(skip)]
+    pub heading: bool,
 }
 
 /// OCR 结果 → 段落块；`skip_cjk` 为真时跳过本身就是中日文的块（目标语言为中文时不必翻译）
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn build_blocks(ocr: &OcrOutput, image: &RgbaImage, skip_cjk: bool) -> Vec<Block> {
+    let mut cfg = crate::config::Config::default();
+    cfg.target_lang = if skip_cjk { "zh-CN".into() } else { "xx".into() };
+    build_blocks_for(ocr, image, &cfg, |_, _| ("", ""), false)
+}
+
+/// OCR 结果 → 段落块，使用统一过滤规则与按块归属的应用判断
+pub fn build_blocks_for<'a>(
+    ocr: &OcrOutput,
+    image: &RgbaImage,
+    cfg: &crate::config::Config,
+    app_at: impl Fn(f32, f32) -> (&'a str, &'a str),
+    record_filter: bool,
+) -> Vec<Block> {
     let (iw, ih) = (image.width() as f32, image.height() as f32);
     let mut segments: Vec<Segment> = ocr
         .lines
@@ -168,8 +185,26 @@ pub fn build_blocks(ocr: &OcrOutput, image: &RgbaImage, skip_cjk: bool) -> Vec<B
         .filter_map(|g| {
             let rect = g.iter().skip(1).fold(g[0].rect, |r, s| r.union(&s.rect));
             let source = join_lines(g.iter().map(|s| s.text.as_str()), ocr.cjk);
-            if !needs_translation(&source, skip_cjk) {
-                return None;
+            let (app_id, app_name) = app_at(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+            let ctx = crate::filter::FilterContext {
+                target_lang: &cfg.target_lang,
+                app_id,
+                app_name,
+                mode: crate::filter::Mode::Overlay,
+            };
+            match crate::filter::classify(cfg, &source, &ctx) {
+                crate::filter::Decision::Keep(reason) => {
+                    if record_filter {
+                        crate::filter::record_event(&source, "keep", reason, &ctx);
+                    }
+                    return None;
+                }
+                crate::filter::Decision::ForceTranslate => {
+                    if record_filter {
+                        crate::filter::record_event(&source, "translate", crate::filter::Reason::ForceTranslate, &ctx);
+                    }
+                }
+                crate::filter::Decision::Translate => {}
             }
             let lines = g.len() as u32;
             let line_h = g.iter().map(|s| s.rect.h).sum::<f32>() / lines as f32;
@@ -219,6 +254,7 @@ pub fn build_blocks(ocr: &OcrOutput, image: &RgbaImage, skip_cjk: bool) -> Vec<B
                 align,
                 bg: hex(bg),
                 fg: hex(fg),
+                heading: g[0].heading,
             })
         })
         .collect()
@@ -476,19 +512,18 @@ fn join_lines<'a>(lines: impl Iterator<Item = &'a str>, cjk: bool) -> String {
     out
 }
 
-/// 纯数字/符号、或本身已是中日文（目标中文时）的块不翻译
+/// 兼容测试入口：调用统一过滤模块判断是否需要翻译
+#[cfg(test)]
 fn needs_translation(text: &str, skip_cjk: bool) -> bool {
-    let letters = text.chars().filter(|c| c.is_alphabetic()).count();
-    if letters == 0 {
-        return false;
-    }
-    if skip_cjk {
-        let cjk = text.chars().filter(|c| is_cjk_char(*c)).count();
-        if cjk * 2 >= letters {
-            return false;
-        }
-    }
-    true
+    let mut cfg = crate::config::Config::default();
+    cfg.target_lang = if skip_cjk { "zh-CN".into() } else { "en".into() };
+    let ctx = crate::filter::FilterContext {
+        target_lang: &cfg.target_lang,
+        app_id: "",
+        app_name: "",
+        mode: crate::filter::Mode::Overlay,
+    };
+    !matches!(crate::filter::classify(&cfg, text, &ctx), crate::filter::Decision::Keep(_))
 }
 
 fn is_cjk_char(c: char) -> bool {

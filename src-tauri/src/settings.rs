@@ -2,7 +2,7 @@
 
 use crate::config::{self, Config, PortableWebview};
 use crate::immersive::{self, DetectedApp, TargetStatus};
-use crate::{store, translate};
+use crate::{filter, store, translate};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -115,6 +115,9 @@ pub fn settings_save(app: AppHandle, mut config: Config) -> Result<(), String> {
     config.store_dir = previous.store_dir;
     config::save(&config)?;
     translate::clear_all_cooldowns();
+    if config.filter != previous.filter {
+        immersive::broadcast_patch(&app, json!({ "resetFilter": true }));
+    }
     if config.frame_corner_radius != previous.frame_corner_radius {
         let _ = app.emit("frame-corner-radius", config.frame_corner_radius);
     }
@@ -189,38 +192,134 @@ pub async fn app_icon(exe: String) -> tauri::ipc::Response {
 }
 
 #[tauri::command]
-pub fn store_query(keyword: String, manual_only: bool, offset: i64, limit: i64) -> Result<store::Page, String> {
+pub fn store_apps() -> Result<Vec<store::AppSummary>, String> {
     let lang = config::load()?.target_lang;
-    store::query(&lang, &keyword, manual_only, offset, limit.clamp(1, 500))
+    store::list_apps(&lang)
+}
+
+#[tauri::command]
+pub fn store_query(
+    keyword: String,
+    manual: Option<bool>,
+    keep: Option<bool>,
+    app: Option<String>,
+    offset: i64,
+    limit: i64,
+) -> Result<store::Page, String> {
+    let lang = config::load()?.target_lang;
+    let filter = store::Filter { keyword: &keyword, manual, keep, app: app.as_deref() };
+    store::query(&lang, &filter, offset, limit.clamp(1, 500))
 }
 
 /// 改译：写成手工译文，并推送到已接管的页面立即生效
 #[tauri::command]
-pub fn store_set(app: AppHandle, source: String, target: String) -> Result<(), String> {
+pub fn store_set(app: AppHandle, source: String, target: String, scope: Option<String>) -> Result<(), String> {
     if source.trim().is_empty() || target.trim().is_empty() {
         return Err(t!("err.store.empty_pair"));
     }
     let lang = config::load()?.target_lang;
-    store::set_manual(&lang, &source, &target)?;
-    let set: BTreeMap<String, String> = [(source, target)].into();
-    immersive::broadcast_patch(&app, json!({ "set": set }));
+    let scope_str = scope.unwrap_or_default();
+    store::set_manual(&lang, &scope_str, &source, &target)?;
+    if target.trim() == source.trim() {
+        immersive::broadcast_patch(&app, json!({ "keep": [source] }));
+    } else {
+        let set: BTreeMap<String, String> = [(source, target)].into();
+        immersive::broadcast_patch(&app, json!({ "set": set }));
+    }
     Ok(())
 }
 
 /// 删除若干条译文；已接管的页面会重新翻译这些原文
 #[tauri::command]
-pub fn store_delete(app: AppHandle, sources: Vec<String>) -> Result<usize, String> {
+pub fn store_delete(app: AppHandle, sources: Vec<String>, scopes: Option<Vec<String>>) -> Result<usize, String> {
     let lang = config::load()?.target_lang;
-    let n = store::delete(&lang, &sources)?;
+    let n = match scopes {
+        Some(sc) if sc.len() == sources.len() => {
+            let pairs: Vec<(String, String)> = sc.into_iter().zip(sources.iter().cloned()).collect();
+            store::delete_scoped(&lang, &pairs)?
+        }
+        _ => store::delete_by_source(&lang, &sources)?,
+    };
     immersive::broadcast_patch(&app, json!({ "del": sources }));
     Ok(n)
 }
 
-/// 清空当前目标语言的译文（可保留手工译文）。已显示在页面上的译文不受影响，页面刷新后才会重新翻译
+/// 清空当前目标语言的译文（支持按软件筛选与保留手工译文）
 #[tauri::command]
-pub fn store_clear(keep_manual: bool) -> Result<usize, String> {
+pub fn store_clear(keep_manual: bool, app: Option<String>) -> Result<usize, String> {
     let lang = config::load()?.target_lang;
-    store::clear(&lang, keep_manual)
+    store::clear_for_app(&lang, app.as_deref(), keep_manual)
+}
+
+#[tauri::command]
+pub fn filter_events(
+    limit: Option<usize>,
+    app_id: Option<String>,
+    only_kept: Option<bool>,
+) -> Vec<filter::FilterEvent> {
+    filter::recent_events(limit.unwrap_or(200), app_id.as_deref(), only_kept.unwrap_or(false))
+}
+
+fn remove_term(list: &mut Vec<String>, term: &str) {
+    list.retain(|x| {
+        let xt = x.trim();
+        !(xt == term || (xt.is_ascii() && term.is_ascii() && xt.eq_ignore_ascii_case(term)))
+    });
+}
+
+fn add_term(list: &mut Vec<String>, term: &str) {
+    if !list.iter().any(|x| x.trim() == term) {
+        list.push(term.to_string());
+    }
+}
+
+/// 从最近过滤记录一键纠错（改为翻译 / 改为不翻）
+#[tauri::command]
+pub fn filter_override(
+    app: AppHandle,
+    text: String,
+    action: String,
+    app_id: Option<String>,
+) -> Result<(), String> {
+    let term = text.trim();
+    if term.is_empty() {
+        return Ok(());
+    }
+    let mut cfg = config::load()?;
+    let norm = app_id.as_deref().map(config::normalize_app_id).unwrap_or_default();
+    let rules = if norm.is_empty() {
+        None
+    } else {
+        Some(cfg.filter.apps.entry(norm.clone()).or_default())
+    };
+    match action.as_str() {
+        "translate" => {
+            if let Some(r) = rules {
+                remove_term(&mut r.keep_terms, term);
+                add_term(&mut r.force_translate, term);
+            } else {
+                remove_term(&mut cfg.filter.keep_terms, term);
+                add_term(&mut cfg.filter.force_translate, term);
+            }
+            config::save(&cfg)?;
+            let _ = store::delete_by_source(&cfg.target_lang, &[term.to_string()]);
+            immersive::broadcast_patch(&app, json!({ "del": [term], "resetFilter": true }));
+        }
+        "keep" => {
+            if let Some(r) = rules {
+                remove_term(&mut r.force_translate, term);
+                add_term(&mut r.keep_terms, term);
+            } else {
+                remove_term(&mut cfg.filter.force_translate, term);
+                add_term(&mut cfg.filter.keep_terms, term);
+            }
+            config::save(&cfg)?;
+            immersive::broadcast_patch(&app, json!({ "keep": [term], "resetFilter": true }));
+        }
+        _ => return Err("未知的过滤操作".into()),
+    }
+    let _ = app.emit("config-changed", ());
+    Ok(())
 }
 
 #[tauri::command]

@@ -66,10 +66,20 @@ pub fn wanted(t: &TargetInfo, target: &ImmersiveTarget) -> bool {
 }
 
 /// 组装注入脚本：把配置和预加载译文（译文库最近常用 + 术语表）填进占位符
+fn target_app_id(target: &ImmersiveTarget) -> String {
+    let raw = if !target.exe.trim().is_empty() {
+        target.exe.as_str()
+    } else {
+        target.name.as_str()
+    };
+    config::normalize_app_id(raw)
+}
+
 fn build_script(cfg: &Config, target: &ImmersiveTarget, show: bool) -> String {
     let target_lang = cfg.target_lang.as_str();
+    let app_id = target_app_id(target);
     let mut preload: HashMap<String, String> = if cfg.persist_cache {
-        store::recent(target_lang, PRELOAD).into_iter().collect()
+        store::recent_for_app(target_lang, &app_id, PRELOAD).into_iter().collect()
     } else {
         HashMap::new()
     };
@@ -146,6 +156,8 @@ async fn run_inner(t: &TargetInfo, mut ctx: Ctx) -> Result<(), String> {
     }
     println!("沉浸模式：已接管页面 {}", t.url);
 
+    let app_id = target_app_id(&ctx.target);
+    let app_name = ctx.target.name.clone();
     let mut stopped = *ctx.stop.borrow();
     while !stopped {
         tokio::select! {
@@ -156,7 +168,15 @@ async fn run_inner(t: &TargetInfo, mut ctx: Ctx) -> Result<(), String> {
                         let c = ev.params["executionContextId"].as_i64().unwrap_or(0);
                         contexts.insert(c);
                         let payload = ev.params["payload"].as_str().unwrap_or("").to_string();
-                        tauri::async_runtime::spawn(answer(cdp.clone(), c, payload, ctx.app.clone(), ctx.status.clone()));
+                        tauri::async_runtime::spawn(answer(
+                            cdp.clone(),
+                            c,
+                            payload,
+                            ctx.app.clone(),
+                            ctx.status.clone(),
+                            app_id.clone(),
+                            app_name.clone(),
+                        ));
                     }
                     "Runtime.executionContextCreated" => {
                         let c = &ev.params["context"];
@@ -219,14 +239,36 @@ async fn run_inner(t: &TargetInfo, mut ctx: Ctx) -> Result<(), String> {
 
 #[derive(Deserialize)]
 struct Request {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    items: Vec<translate::TranslateItem>,
+    #[serde(default)]
     texts: Vec<String>,
 }
 
-/// 处理页面发来的一批原文：翻译（术语表 → 译文库 → 引擎）后回填
-async fn answer(cdp: cdp::Cdp, ctx_id: i64, payload: String, app: AppHandle, status: SharedStatus) {
+/// 处理页面发来的一批原文：统一过滤 → 术语表 → 译文库 → 引擎 后回填
+async fn answer(
+    cdp: cdp::Cdp,
+    ctx_id: i64,
+    payload: String,
+    app: AppHandle,
+    status: SharedStatus,
+    app_id: String,
+    app_name: String,
+) {
     let Ok(req) = serde_json::from_str::<Request>(&payload) else { return };
-    let texts: Vec<String> = req.texts.into_iter().filter(|t| !t.trim().is_empty()).take(200).collect();
-    if texts.is_empty() {
+    let mut items: Vec<translate::TranslateItem> = if !req.items.is_empty() {
+        req.items
+    } else {
+        req.texts
+            .into_iter()
+            .map(|text| translate::TranslateItem { text, role: None, group: None })
+            .collect()
+    };
+    items.retain(|it| !it.text.trim().is_empty());
+    items.truncate(200);
+    if items.is_empty() {
         return;
     }
     let cfg = match config::load() {
@@ -236,31 +278,61 @@ async fn answer(cdp: cdp::Cdp, ctx_id: i64, payload: String, app: AppHandle, sta
             return;
         }
     };
+    let batch_ctx = translate::BatchContext {
+        mode: translate::SourceMode::Dom,
+        app_id,
+        app_name,
+        title: req.title,
+    };
     let start = std::time::Instant::now();
-    let expr = match translate::translate_batch_with_fallback(&cfg, &texts, "沉浸模式").await {
+    let count = items.len();
+    let keys: Vec<String> = items
+        .iter()
+        .map(|it| match it.group {
+            Some(g) => format!("{g}\u{0000}{}", it.text),
+            None => it.text.clone(),
+        })
+        .collect();
+
+    let expr = match translate::translate_items_with_fallback(&cfg, &items, &batch_ctx, "沉浸模式").await {
         Ok((translated, engine)) => {
+            let applied = translated.iter().filter(|r| !r.keep).count();
             {
                 let mut s = status.lock().unwrap();
-                s.translated += texts.len() as u64;
+                s.translated += applied as u64;
                 if engine != translate::cache_engine() {
                     s.engine_batches += 1;
-                    println!("沉浸模式：{} 条由【{engine}】翻译", texts.len());
+                    println!("沉浸模式：{count} 条由【{engine}】处理（回填 {applied} 条）");
                 }
             }
             notify(&app);
-            let map: HashMap<&String, String> = texts.iter().zip(translated).collect();
-            format!("globalThis.__tf && __tf.receive({})", json!({ "map": map }))
+            let mut map: HashMap<String, String> = HashMap::new();
+            let mut grouped: HashMap<String, String> = HashMap::new();
+            let mut keep: Vec<String> = Vec::new();
+            for (it, res) in items.into_iter().zip(translated) {
+                if res.keep {
+                    keep.push(it.text);
+                } else if let Some(g) = it.group {
+                    grouped.insert(format!("{g}\u{0000}{}", it.text), res.text);
+                } else {
+                    map.insert(it.text, res.text);
+                }
+            }
+            format!(
+                "globalThis.__tf && __tf.receive({})",
+                json!({ "map": map, "grouped": grouped, "keep": keep })
+            )
         }
         Err(e) => {
             eprintln!("沉浸模式：翻译失败：{e}");
-            format!("globalThis.__tf && __tf.failed({})", json!({ "texts": texts }))
+            format!("globalThis.__tf && __tf.failed({})", json!({ "keys": keys }))
         }
     };
     let translated_at = start.elapsed();
     let _ = eval(&cdp, ctx_id, &expr).await;
     tlog!(
         "沉浸模式 本批 {} 条：翻译 {} · 回填页面 {} · 共 {}",
-        texts.len(),
+        count,
         crate::timing::secs(translated_at),
         crate::timing::secs(start.elapsed() - translated_at),
         crate::timing::secs(start.elapsed())

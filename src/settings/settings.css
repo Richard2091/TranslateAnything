@@ -405,6 +405,10 @@ main::-webkit-scrollbar-thumb:hover {
 :root {
   --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
   --ease-spring: cubic-bezier(0.32, 1.25, 0.45, 1);
+  /* 展开 / 收起、下拉弹出统一用这一组：高度（或裁切）展开 + 略微下滑 + 淡入 */
+  --fold-time: 0.32s;
+  --fade-time: 0.26s;
+  --fold-out-time: 0.22s;
   interpolate-size: allow-keywords;
 }
 
@@ -437,17 +441,37 @@ main::-webkit-scrollbar-thumb:hover {
   }
 }
 
-/* 打开编辑表单 */
-.pop-in {
-  animation: pop 0.28s var(--ease-out) both;
+/* 可折叠区域：高度平滑展开 / 收起，内容略微下滑淡入（见 ui.ts collapsible） */
+.collapse {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows var(--fold-time) var(--ease-out),
+    opacity var(--fade-time) ease;
 }
 
-@keyframes pop {
-  from {
-    opacity: 0;
-    transform: translateY(-4px) scale(0.99);
-  }
+.collapse.closed {
+  grid-template-rows: 0fr;
+  opacity: 0;
 }
+
+.collapse > .collapse-inner {
+  min-height: 0;
+}
+
+/* 只在动画过程中裁剪，展开后不挡住输入框的焦点光环 */
+.collapse.moving > .collapse-inner {
+  overflow: hidden;
+}
+
+.collapse > .collapse-inner > * {
+  transition: transform var(--fold-time) var(--ease-out);
+}
+
+.collapse.closed > .collapse-inner > * {
+  transform: translateY(-6px);
+}
+
 
 /* 页首说明：侧栏已标明当前页，不再放大标题；不固定，随内容一起滚走 */
 .page-head {
@@ -576,38 +600,65 @@ button.dropdown.open svg {
   border: 1px solid var(--line-strong);
   box-shadow: var(--shadow-lg);
   outline: none;
-  transform-origin: top center;
-  animation: dd-in 0.18s var(--ease-out);
+  /* 与 .collapse 同一套效果：从触发处向下展开（上方弹出时向上），略微滑动并淡入 */
+  animation: dd-in var(--fold-time) var(--ease-out);
 }
 
 .dd-pop.up {
-  transform-origin: bottom center;
   animation-name: dd-in-up;
 }
 
 .dd-pop.leaving {
   pointer-events: none;
-  animation: dd-out 0.12s ease-in forwards;
+  animation: dd-out var(--fold-out-time) var(--ease-out) forwards;
 }
 
+.dd-pop.up.leaving {
+  animation-name: dd-out-up;
+}
+
+/* 裁切框四周多留 40px，阴影不被切掉 */
 @keyframes dd-in {
   from {
+    clip-path: inset(-40px -40px 100% -40px);
+    translate: 0 -6px;
     opacity: 0;
-    transform: translateY(-4px) scale(0.97);
+  }
+  to {
+    clip-path: inset(-40px);
   }
 }
 
 @keyframes dd-in-up {
   from {
+    clip-path: inset(100% -40px -40px -40px);
+    translate: 0 6px;
     opacity: 0;
-    transform: translateY(4px) scale(0.97);
+  }
+  to {
+    clip-path: inset(-40px);
   }
 }
 
 @keyframes dd-out {
+  from {
+    clip-path: inset(-40px);
+  }
   to {
+    clip-path: inset(-40px -40px 100% -40px);
+    translate: 0 -6px;
     opacity: 0;
-    transform: scale(0.98);
+  }
+}
+
+@keyframes dd-out-up {
+  from {
+    clip-path: inset(-40px);
+  }
+  to {
+    clip-path: inset(100% -40px -40px -40px);
+    translate: 0 6px;
+    opacity: 0;
   }
 }
 
@@ -696,9 +747,10 @@ button.dropdown.open svg {
   border-radius: 7px;
   background: var(--panel);
   box-shadow: var(--shadow-sm), 0 0 0 1px var(--line);
+  /* 与侧栏选中条同一条弹性曲线和时长 */
   transition:
-    transform 0.32s var(--ease-spring),
-    width 0.32s var(--ease-spring);
+    transform 0.38s var(--ease-spring),
+    width 0.38s var(--ease-spring);
 }
 
 /* ───── 概览磁贴 ───── */
@@ -1062,8 +1114,12 @@ button.link-btn:hover svg {
   font-weight: 500;
 }
 
-.engine-params {
+.engine-params,
+.engine-row > .collapse {
   flex-basis: 100%;
+}
+
+.engine-params {
   padding: 0 0 16px 60px;
 }
 
@@ -1890,13 +1946,25 @@ label.field > span {
   height: 0;
 }
 
+/* 开关：滑块弹性滑动、按下时拉长，底色渐变淡入淡出（渐变背景本身没法过渡，放在 ::before 上改透明度）。
+ * 拨动后整页重绘会换掉开关元素，新元素靠 .sw-on / .sw-off 接着把动画放完（见 ui.ts keepSwitchMotion） */
 .switch i {
   position: absolute;
   inset: 0;
   border-radius: 999px;
   background: var(--line-strong);
-  transition: background 0.2s;
   cursor: pointer;
+  transition: box-shadow 0.15s, opacity 0.2s;
+}
+
+.switch i::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--brand-grad);
+  opacity: 0;
+  transition: opacity var(--fade-time) ease;
 }
 
 .switch i::after {
@@ -1906,18 +1974,64 @@ label.field > span {
   left: 3px;
   width: 18px;
   height: 18px;
-  border-radius: 50%;
+  border-radius: 999px;
   background: #fff;
-  transition: transform 0.22s cubic-bezier(0.3, 1.4, 0.5, 1);
   box-shadow: 0 1px 3px rgb(0 0 0 / 22%);
+  transition:
+    transform var(--fold-time) var(--ease-spring),
+    width 0.18s var(--ease-out);
 }
 
-.switch input:checked + i {
-  background: var(--brand-grad);
+.switch input:checked + i::before {
+  opacity: 1;
 }
 
 .switch input:checked + i::after {
   transform: translateX(18px);
+}
+
+/* 按下时滑块拉长；打开状态向左拉长，保持贴着右侧 */
+.switch:active input:not(:disabled) + i::after {
+  width: 22px;
+}
+
+.switch:active input:checked:not(:disabled) + i::after {
+  transform: translateX(14px);
+}
+
+.switch.sw-on i::before,
+.switch.sw-off i::before {
+  animation: var(--fade-time) ease var(--sw-delay, 0s) both;
+}
+
+.switch.sw-on i::after,
+.switch.sw-off i::after {
+  animation: var(--fold-time) var(--ease-spring) var(--sw-delay, 0s) both;
+}
+
+.switch.sw-on i::before { animation-name: sw-fill-on; }
+.switch.sw-off i::before { animation-name: sw-fill-off; }
+.switch.sw-on i::after { animation-name: sw-knob-on; }
+.switch.sw-off i::after { animation-name: sw-knob-off; }
+
+@keyframes sw-fill-on {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes sw-fill-off {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+@keyframes sw-knob-on {
+  from { transform: none; }
+  to { transform: translateX(18px); }
+}
+
+@keyframes sw-knob-off {
+  from { transform: translateX(18px); }
+  to { transform: none; }
 }
 
 .switch input:focus-visible + i {
@@ -1964,20 +2078,23 @@ details.pages summary:hover {
   color: var(--accent-text);
 }
 
-/* 展开 / 收起：高度平滑过渡 */
-details.pages::details-content {
+/* 展开 / 收起：与 .collapse 同一套效果（高度平滑展开、内容略微下滑淡入） */
+details::details-content {
   block-size: 0;
   overflow: hidden;
   opacity: 0;
+  translate: 0 -6px;
   transition:
-    block-size 0.28s var(--ease-out),
-    opacity 0.2s ease,
-    content-visibility 0.28s allow-discrete;
+    block-size var(--fold-time) var(--ease-out),
+    translate var(--fold-time) var(--ease-out),
+    opacity var(--fade-time) ease,
+    content-visibility var(--fold-time) allow-discrete;
 }
 
-details.pages[open]::details-content {
+details[open]::details-content {
   block-size: auto;
   opacity: 1;
+  translate: none;
 }
 
 details.pages ul {
@@ -2301,12 +2418,12 @@ tr.manual td:first-child {
   animation: rise 0.25s var(--ease-out) both;
 }
 
+/* 四周留 3px 给输入框的焦点光环（滚动容器会裁掉溢出部分），再用负外边距抵消，内容位置不变 */
 .dialog-body {
-  margin-top: 12px;
+  margin: 9px -10px -3px -3px;
+  padding: 3px 10px 3px 3px;
   max-height: min(60vh, 520px);
   overflow-y: auto;
-  margin-right: -10px;
-  padding-right: 10px;
 }
 
 #modal .dialog .actions .spacer {
@@ -2448,6 +2565,15 @@ h2.section .btn {
   color: var(--accent);
 }
 
+/* 可搜索下拉：箭头随展开翻转，和普通下拉框一致 */
+.input-wrap.combo.select button.input-icon svg {
+  transition: transform 0.25s var(--ease-spring);
+}
+
+.input-wrap.combo.select.open button.input-icon svg {
+  transform: rotate(180deg);
+}
+
 .dd-item.bad .dd-hint {
   color: var(--bad, #d14343);
   white-space: pre-wrap;
@@ -2472,6 +2598,7 @@ input.hotkey-input.recording {
 input.hotkey-input.recording::placeholder {
   color: var(--accent-text);
 }
+
 /* ───── 通栏链路卡片、子页状态横幅、悬停详情浮层与 AI 预设弹窗 ───── */
 .tile-wide {
   grid-column: 1 / -1;
@@ -2589,18 +2716,19 @@ input.hotkey-input.recording::placeholder {
   background: var(--warn-dot);
 }
 
+/* 首页“语言与网络”里的网络：标签 + 与语言同款的下拉（自定义时下方多一个地址框） */
 .proxy-summary {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 6px;
   margin-top: auto;
   padding-top: 12px;
   font-size: 12.5px;
 }
 
-.proxy-summary b {
-  font-weight: 500;
-  min-width: 0;
+/* 卡片较窄，自定义代理的地址框换到下一行 */
+.proxy-summary .proxy-field {
+  grid-template-columns: 1fr;
 }
 
 .status-banner {
@@ -2710,6 +2838,32 @@ input.hotkey-input.recording::placeholder {
   color: var(--bad);
 }
 
+/* 说明 + 搜索框吸顶，列表在下面滚动 */
+.preset-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--panel);
+  padding-bottom: 14px;
+}
+
+#modal .dialog .preset-search .muted {
+  margin: 0 0 10px;
+}
+
+.preset-empty {
+  margin: 4px 0 12px;
+}
+
+.preset-item[hidden],
+.preset-group[hidden] {
+  display: none;
+}
+
+.preset-group[hidden] + .preset-group {
+  margin-top: 0;
+}
+
 .preset-group + .preset-group {
   margin-top: 14px;
 }
@@ -2729,9 +2883,9 @@ input.hotkey-input.recording::placeholder {
 
 .preset-item {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
   padding: 9px 11px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--line);
@@ -2747,6 +2901,46 @@ input.hotkey-input.recording::placeholder {
   border-color: var(--accent);
   background: var(--accent-soft);
 }
+
+.preset-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* 服务商 logo 方块（见 logos/index.ts） */
+.logo {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+.logo svg {
+  width: 18px;
+  height: 18px;
+}
+
+.logo.generic svg {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.8;
+  stroke-linejoin: round;
+}
+
+.engine-pick .logo {
+  width: 30px;
+  height: 30px;
+}
+
 
 .preset-name {
   font-size: 13px;
@@ -2772,4 +2966,207 @@ input.hotkey-input.recording::placeholder {
 
 h2.section .spacer {
   flex: 1;
+}
+
+/* ───── 译文库“更多筛选”：按钮带生效条件数，面板在工具栏下方展开 ───── */
+.lib-filter-btn svg:last-child {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.25s var(--ease-spring);
+}
+
+.lib-filter-btn.open svg:last-child {
+  transform: rotate(180deg);
+}
+
+.lib-filter-btn.open {
+  color: var(--accent-text);
+}
+
+.filter-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.filter-count[hidden] {
+  display: none;
+}
+
+.lib-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 24px;
+  padding: 12px 16px 12px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.lib-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.lib-filter-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.lib-filter-reset {
+  margin-left: auto;
+  font-size: 12.5px;
+}
+
+/* ───── 译文库“软件”列：表格够宽时图标 + 名称，窄时只留图标 ───── */
+#lib-table {
+  container-type: inline-size;
+}
+
+.lib-app-col {
+  width: 150px;
+}
+
+.lib-apps {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.lib-app-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 1px 6px 1px 1px;
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.lib-app-chip:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.lib-app-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 首字图标：按程序名定色相，浅色 / 深色主题各一组明度 */
+.app-avatar {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  background: hsl(var(--h) 70% 92%);
+  color: hsl(var(--h) 50% 34%);
+}
+
+@media (prefers-color-scheme: dark) {
+  .app-avatar {
+    background: hsl(var(--h) 35% 26%);
+    color: hsl(var(--h) 75% 80%);
+  }
+}
+
+.lib-app-more,
+.lib-app-none {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.lib-app-more {
+  padding-left: 4px;
+  cursor: default;
+}
+
+@container (max-width: 820px) {
+  .lib-app-col {
+    width: 84px;
+  }
+
+  .lib-apps {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .lib-app-chip {
+    padding: 1px;
+  }
+
+  .lib-app-name {
+    display: none;
+  }
+}
+
+/* 来源列：标签放不下时省略，悬停看全称；删除列只容一个图标按钮 */
+.lib-engine-col {
+  width: 148px;
+}
+
+.tag.lib-engine {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+
+.lib-del-col {
+  width: 44px;
+  padding-left: 0;
+}
+
+.lib-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.tag.warn {
+  background: var(--warn-soft, rgba(217, 119, 6, 0.14));
+  color: var(--warn, #b45309);
+}
+
+.filter-rules-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+@media (max-width: 820px) {
+  .filter-rules-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+textarea.rule-box {
+  min-height: 112px;
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+  font-size: 12px;
+  resize: vertical;
 }

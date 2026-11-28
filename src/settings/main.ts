@@ -12,6 +12,7 @@ import { renderMt } from "./pages/mt";
 import { renderAi } from "./pages/ai";
 import { buildLibrary, queryLibrary } from "./pages/library";
 import { glossaryDirty, renderGlossary, resetGlossaryDraft } from "./pages/glossary";
+import { filterDirty, loadFilterPage, renderFilter, resetFilterDraft } from "./pages/filter";
 import { loadAutostart, renderGeneral } from "./pages/general";
 import { initI18n, isZh, t } from "../i18n";
 
@@ -25,6 +26,7 @@ const PAGES: Record<string, Page> = {
   ai: { render: renderAi, onShow: () => loadCooldowns() },
   library: { render: buildLibrary, onShow: queryLibrary },
   glossary: { render: renderGlossary },
+  filter: { render: renderFilter, onShow: loadFilterPage },
   general: { render: renderGeneral },
 };
 
@@ -181,7 +183,9 @@ setInterval(async () => {
   await listen("config-changed", async () => {
     await loadView();
     resetGlossaryDraft();
+    resetFilterDraft();
     if (current === "glossary" && glossaryDirty()) return;
+    if (current === "filter" && filterDirty()) return;
     if (current !== "library") backgroundRender();
   });
   await listen<string>("settings-goto", (e) => {

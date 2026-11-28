@@ -9,20 +9,23 @@ mod edge;
 mod gemini;
 mod google;
 mod google_free;
+mod limiter;
 mod llm;
 mod microsoft;
 mod openai;
 
-use crate::config::{Config, ProviderConfig};
+use crate::config::{Config, ProviderConfig, normalize_app_id};
+use crate::filter::{self, Decision, FilterContext, Mode as FilterMode, Reason};
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use tokio::sync::watch;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TranslateError {
     /// 配置缺失或不合法
     Config(String),
@@ -30,6 +33,11 @@ pub enum TranslateError {
     Network(String),
     /// 服务端返回了错误
     Api(String),
+    /// 触发速率限制（HTTP 429）
+    RateLimited {
+        message: String,
+        retry_after: Option<Duration>,
+    },
 }
 
 impl fmt::Display for TranslateError {
@@ -37,9 +45,39 @@ impl fmt::Display for TranslateError {
         match self {
             Self::Config(m) => f.write_str(&t!("err.engine.config", m = m)),
             Self::Network(m) => f.write_str(&t!("err.engine.network", m = m)),
-            Self::Api(m) => f.write_str(&t!("err.engine.api", m = m)),
+            Self::Api(m) | Self::RateLimited { message: m, .. } => f.write_str(&t!("err.engine.api", m = m)),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceMode {
+    #[default]
+    Ocr,
+    Dom,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchContext {
+    pub mode: SourceMode,
+    pub app_id: String,
+    pub app_name: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TranslateItem {
+    pub text: String,
+    #[serde(default)]
+    pub role: Option<String>,
+    #[serde(default)]
+    pub group: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslatedItem {
+    pub text: String,
+    pub keep: bool,
 }
 
 #[async_trait]
@@ -53,6 +91,26 @@ pub trait Translator: Send + Sync {
             out.push(self.translate(t, target_lang).await?);
         }
         Ok(out)
+    }
+
+    /// 带轻量上下文与语义保留判定的批量翻译（传统引擎默认复用 `translate_batch`）
+    async fn translate_items(
+        &self,
+        items: &[TranslateItem],
+        _ctx: &BatchContext,
+        _keep_terms: &[String],
+        target_lang: &str,
+    ) -> Result<Vec<TranslatedItem>, TranslateError> {
+        let texts: Vec<String> = items.iter().map(|it| it.text.clone()).collect();
+        let translated = self.translate_batch(&texts, target_lang).await?;
+        Ok(items
+            .iter()
+            .zip(translated)
+            .map(|(it, tr)| {
+                let keep = tr.trim() == it.text.trim();
+                TranslatedItem { text: if keep { it.text.clone() } else { tr }, keep }
+            })
+            .collect())
     }
 
     /// 指定原文语言批量翻译（`from` 为 BCP 47 代码，如 `zh`、`ja`）。
@@ -164,7 +222,7 @@ pub const CATALOG: &[EngineInfo] = &[
         name: "engine.openai.name",
         needs_key: true,
         official: true,
-        fields: &["base_url", "api_key", "model", "proxy"],
+        fields: &["base_url", "api_key", "model", "concurrency", "proxy"],
         default_base_url: "",
         note: "engine.openai.note",
     },
@@ -173,7 +231,7 @@ pub const CATALOG: &[EngineInfo] = &[
         name: "engine.anthropic.name",
         needs_key: true,
         official: true,
-        fields: &["base_url", "api_key", "model", "proxy"],
+        fields: &["base_url", "api_key", "model", "concurrency", "proxy"],
         default_base_url: anthropic::DEFAULT_BASE,
         note: "engine.anthropic.note",
     },
@@ -182,14 +240,14 @@ pub const CATALOG: &[EngineInfo] = &[
         name: "engine.gemini.name",
         needs_key: true,
         official: true,
-        fields: &["base_url", "api_key", "model", "proxy"],
+        fields: &["base_url", "api_key", "model", "concurrency", "proxy"],
         default_base_url: gemini::DEFAULT_BASE,
         note: "engine.gemini.note",
     },
 ];
 
-/// 按引擎类型创建 Provider
-pub fn create(kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, TranslateError> {
+/// 按引擎类型和实例 id 创建 Provider
+pub fn create_with_id(id: &str, kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, TranslateError> {
     Ok(match kind {
         "edge" => Box::new(edge::Edge::new(cfg, edge::Route::EdgeThenBing)?),
         "bing" => Box::new(edge::Edge::new(cfg, edge::Route::BingOnly)?),
@@ -198,9 +256,11 @@ pub fn create(kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, T
         "deepl" => Box::new(deepl::DeepL::new(cfg)?),
         "deeplx" => Box::new(deeplx::DeepLX::new(cfg)?),
         "google" => Box::new(google::Google::new(cfg)?),
-        "openai" => Box::new(openai::OpenAICompatible::new(cfg)?),
-        "anthropic" => Box::new(anthropic::Anthropic::new(cfg)?),
-        "gemini" => Box::new(gemini::Gemini::new(cfg)?),
+        "openai" => Box::new(openai::OpenAICompatible::new_with_id(id, cfg)?),
+        "anthropic" => Box::new(anthropic::Anthropic::new_with_id(id, cfg)?),
+        "gemini" => Box::new(gemini::Gemini::new_with_id(id, cfg)?),
+        // 新建的自定义接口还没选协议（类型留空时 kind 回退成实例 id，AI 实例 id 都以 ai_ 开头）
+        other if is_unset_ai(other) => return Err(TranslateError::Config(t!("err.engine.no_protocol"))),
         other => {
             let ids: Vec<_> = CATALOG.iter().map(|e| e.id).collect();
             return Err(TranslateError::Config(t!(
@@ -210,6 +270,16 @@ pub fn create(kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, T
             )));
         }
     })
+}
+
+/// AI 供应商实例尚未选择协议
+fn is_unset_ai(kind: &str) -> bool {
+    kind.starts_with("ai_")
+}
+
+/// 按引擎类型创建 Provider
+pub fn create(kind: &str, cfg: &ProviderConfig) -> Result<Box<dyn Translator>, TranslateError> {
+    create_with_id(kind, kind, cfg)
 }
 
 /// 引擎的显示名（按当前界面语言）；不在清单里的原样返回
@@ -255,76 +325,316 @@ pub fn builtin_glossary(target_lang: &str) -> std::collections::BTreeMap<String,
     builtin.get(&key).cloned().unwrap_or_default()
 }
 
-/// 批量翻译：术语表 → 本地译文库 → 翻译引擎（主引擎 + 回退），引擎结果写回译文库。
-/// 返回（与 `texts` 一一对应的译文，实际使用的引擎名；没有请求引擎时为"本地缓存"）
-/// `who` 只用于耗时日志，标明调用方（悬浮窗 / 沉浸模式）
+/// 批量翻译兼容入口（不带上下文）
+#[allow(dead_code)]
 pub async fn translate_batch_with_fallback(
     cfg: &Config,
     texts: &[String],
     who: &str,
 ) -> Result<(Vec<String>, String), String> {
-    use crate::timing::secs;
-    let start = Instant::now();
-    let lang = cfg.target_lang.as_str();
-    let terms = glossary(cfg);
-    let mut found: HashMap<String, String> = texts
+    let items: Vec<TranslateItem> = texts
         .iter()
-        .filter_map(|t| terms.get(t.trim()).map(|g| (t.clone(), g.clone())))
+        .map(|t| TranslateItem { text: t.clone(), role: None, group: None })
         .collect();
-    let glossary_hits = found.len();
-    let rest: Vec<String> = texts.iter().filter(|t| !found.contains_key(*t)).cloned().collect();
-    let t = Instant::now();
-    if cfg.persist_cache && !rest.is_empty() {
-        found.extend(crate::store::get_many(lang, &rest));
-    }
-    let store_time = t.elapsed();
-    let store_hits = found.len() - glossary_hits;
-    let mut missing: Vec<String> = Vec::new();
-    for t in rest {
-        if !found.contains_key(&t) && !missing.contains(&t) {
-            missing.push(t);
+    let ctx = BatchContext::default();
+    let (res, engine) = translate_items_with_fallback(cfg, &items, &ctx, who).await?;
+    Ok((res.into_iter().map(|r| r.text).collect(), engine))
+}
+
+type InflightKey = (String, String, String);
+type InflightMap = HashMap<InflightKey, watch::Receiver<Option<Result<TranslatedItem, String>>>>;
+static INFLIGHT: OnceLock<Mutex<InflightMap>> = OnceLock::new();
+
+fn inflight_map() -> &'static Mutex<InflightMap> {
+    INFLIGHT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+struct InflightGuard {
+    senders: HashMap<InflightKey, watch::Sender<Option<Result<TranslatedItem, String>>>>,
+}
+
+impl InflightGuard {
+    fn complete(&mut self, results: &[(InflightKey, Result<TranslatedItem, String>)]) {
+        if !self.senders.is_empty() {
+            let mut map = inflight_map().lock().unwrap();
+            for (k, _) in results {
+                map.remove(k);
+            }
+        }
+        for (k, res) in results {
+            if let Some(tx) = self.senders.remove(k) {
+                let _ = tx.send(Some(res.clone()));
+            }
         }
     }
-    let engine = if missing.is_empty() {
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        if self.senders.is_empty() {
+            return;
+        }
+        let mut map = inflight_map().lock().unwrap();
+        for (k, tx) in self.senders.drain() {
+            map.remove(&k);
+            let _ = tx.send(Some(Err("请求已取消".into())));
+        }
+    }
+}
+
+fn scope_key(text: &str, app_id: &str) -> String {
+    let norm = normalize_app_id(app_id);
+    if !norm.is_empty() && crate::store::is_app_scoped(text, false) {
+        norm
+    } else {
+        String::new()
+    }
+}
+
+/// 批量翻译（带过滤、上下文、在途去重、缓存隔离）：
+/// 本地过滤 → 术语表 → 译文库 → 在途合并 & 翻译引擎 → 写回译文库
+pub async fn translate_items_with_fallback(
+    cfg: &Config,
+    items: &[TranslateItem],
+    ctx: &BatchContext,
+    who: &str,
+) -> Result<(Vec<TranslatedItem>, String), String> {
+    use crate::timing::secs;
+    if items.is_empty() {
+        return Ok((Vec::new(), cache_engine()));
+    }
+    let start = Instant::now();
+    let lang = cfg.target_lang.as_str();
+    let app_id = normalize_app_id(&ctx.app_id);
+    let fmode = match ctx.mode {
+        SourceMode::Dom => FilterMode::Immersive,
+        SourceMode::Ocr => FilterMode::Overlay,
+    };
+    let fctx = FilterContext {
+        target_lang: lang,
+        app_id: &app_id,
+        app_name: &ctx.app_name,
+        mode: fmode,
+    };
+
+    let mut out: Vec<Option<TranslatedItem>> = vec![None; items.len()];
+    let mut forced = vec![false; items.len()];
+    let mut filter_kept = 0usize;
+
+    // 1. 统一本地过滤
+    for (i, it) in items.iter().enumerate() {
+        match filter::classify(cfg, &it.text, &fctx) {
+            Decision::Keep(reason) => {
+                filter::record_event(&it.text, "keep", reason, &fctx);
+                out[i] = Some(TranslatedItem { text: it.text.clone(), keep: true });
+                filter_kept += 1;
+            }
+            Decision::ForceTranslate => {
+                filter::record_event(&it.text, "translate", Reason::ForceTranslate, &fctx);
+                forced[i] = true;
+            }
+            Decision::Translate => {}
+        }
+    }
+
+    // 2. 术语表（整条精确匹配；用户强制翻译且术语原样保留时不拦截）
+    let terms = glossary(cfg);
+    let mut glossary_hits = 0usize;
+    for (i, it) in items.iter().enumerate() {
+        if out[i].is_some() {
+            continue;
+        }
+        if let Some(g) = terms.get(it.text.trim()) {
+            let keep = g.trim() == it.text.trim();
+            if forced[i] && keep {
+                continue;
+            }
+            out[i] = Some(TranslatedItem {
+                text: if keep { it.text.clone() } else { g.clone() },
+                keep,
+            });
+            glossary_hits += 1;
+        }
+    }
+
+    // 3. 本地译文库查询（内联拆碎的片段跳过译文库，保留完整句上下文）
+    let t = Instant::now();
+    let mut store_hits = 0usize;
+    let store_sources: Vec<String> = items
+        .iter()
+        .enumerate()
+        .filter(|(i, it)| out[*i].is_none() && it.group.is_none())
+        .map(|(_, it)| it.text.clone())
+        .collect();
+    if cfg.persist_cache && !store_sources.is_empty() {
+        let hit_map = crate::store::get_many_for_app(lang, &app_id, &ctx.app_name, &store_sources);
+        for (i, it) in items.iter().enumerate() {
+            if out[i].is_some() || it.group.is_some() {
+                continue;
+            }
+            if let Some((tr, keep)) = hit_map.get(&it.text) {
+                if forced[i] && *keep {
+                    continue;
+                }
+                out[i] = Some(TranslatedItem {
+                    text: if *keep { it.text.clone() } else { tr.clone() },
+                    keep: *keep,
+                });
+                store_hits += 1;
+            }
+        }
+    }
+    let store_time = t.elapsed();
+
+    // 4. 收集未命中项，非内联片段走全局在途去重
+    let mut waiting: Vec<(usize, watch::Receiver<Option<Result<TranslatedItem, String>>>)> = Vec::new();
+    let mut engine_indices: Vec<Vec<usize>> = Vec::new();
+    let mut engine_items: Vec<TranslateItem> = Vec::new();
+    let mut engine_keys: Vec<Option<InflightKey>> = Vec::new();
+    let mut owned_map: HashMap<InflightKey, usize> = HashMap::new();
+    let mut guard = InflightGuard { senders: HashMap::new() };
+
+    {
+        let mut inflight = inflight_map().lock().unwrap();
+        for (i, it) in items.iter().enumerate() {
+            if out[i].is_some() {
+                continue;
+            }
+            if it.group.is_some() {
+                engine_indices.push(vec![i]);
+                engine_items.push(it.clone());
+                engine_keys.push(None);
+                continue;
+            }
+            let key = (lang.to_string(), scope_key(&it.text, &app_id), it.text.clone());
+            if let Some(&pos) = owned_map.get(&key) {
+                engine_indices[pos].push(i);
+            } else if let Some(rx) = inflight.get(&key) {
+                waiting.push((i, rx.clone()));
+            } else {
+                let (tx, rx) = watch::channel(None);
+                inflight.insert(key.clone(), rx);
+                guard.senders.insert(key.clone(), tx);
+                let pos = engine_items.len();
+                owned_map.insert(key.clone(), pos);
+                engine_indices.push(vec![i]);
+                engine_items.push(it.clone());
+                engine_keys.push(Some(key));
+            }
+        }
+    }
+
+    let engine = if engine_items.is_empty() && waiting.is_empty() {
         tlog!(
-            "{who} 翻译 {} 条：术语表命中 {glossary_hits} · 译文库 {} 命中 {store_hits} · 无需请求引擎 · 共 {}",
-            texts.len(),
+            "{who} 翻译 {} 条：过滤 {filter_kept} · 术语表 {glossary_hits} · 译文库 {} 命中 {store_hits} · 共 {}",
+            items.len(),
             secs(store_time),
             secs(start.elapsed())
         );
         cache_engine()
     } else {
-        let t = Instant::now();
-        let result = translate_by_engines(cfg, &missing).await;
-        let api_time = t.elapsed();
-        let (translated, id, display_name) = match result {
-            Ok(v) => v,
-            Err(e) => {
-                tlog!("{who} 翻译 {} 条：引擎全部失败，耗时 {}", missing.len(), secs(api_time));
-                return Err(e);
+        let mut used_name = cache_engine();
+        if !engine_items.is_empty() {
+            let t = Instant::now();
+            let rule_set = filter::active_keep_terms(cfg, &app_id);
+            let keep_terms: Vec<String> = rule_set
+                .keep_terms
+                .into_iter()
+                .filter(|term| {
+                    let t_trim = term.trim();
+                    !t_trim.is_empty()
+                        && engine_items
+                            .iter()
+                            .any(|it| it.text.to_lowercase().contains(&t_trim.to_lowercase()))
+                })
+                .take(30)
+                .collect();
+
+            let result = translate_items_by_engines(cfg, &engine_items, ctx, &keep_terms).await;
+            let api_time = t.elapsed();
+            let (translated, id, display_name, is_ai) = match result {
+                Ok(v) => v,
+                Err(e) => {
+                    let err_pairs: Vec<(InflightKey, Result<TranslatedItem, String>)> = engine_keys
+                        .into_iter()
+                        .flatten()
+                        .map(|k| (k, Err(e.clone())))
+                        .collect();
+                    guard.complete(&err_pairs);
+                    tlog!("{who} 翻译 {} 条：引擎全部失败，耗时 {}", engine_items.len(), secs(api_time));
+                    return Err(e);
+                }
+            };
+
+            let mut to_store: Vec<(String, String, bool)> = Vec::new();
+            let mut done_pairs: Vec<(InflightKey, Result<TranslatedItem, String>)> = Vec::new();
+            let mut ok_reason_pairs = Vec::new();
+
+            for ((it, tr), (idxs, key_opt)) in engine_items
+                .iter()
+                .zip(translated)
+                .zip(engine_indices.into_iter().zip(engine_keys.into_iter()))
+            {
+                if tr.keep {
+                    ok_reason_pairs.push((
+                        it.text.clone(),
+                        if is_ai { Reason::AiKeep } else { Reason::EngineUnchanged },
+                    ));
+                }
+                if it.group.is_none() {
+                    to_store.push((it.text.clone(), tr.text.clone(), tr.keep));
+                }
+                if let Some(key) = key_opt {
+                    done_pairs.push((key, Ok(tr.clone())));
+                }
+                for idx in idxs {
+                    out[idx] = Some(tr.clone());
+                }
             }
-        };
-        let n = missing.len();
-        let pairs: Vec<(String, String)> = missing.into_iter().zip(translated).collect();
-        let t = Instant::now();
-        if cfg.persist_cache {
-            // 译文库里记引擎实例 id（与界面语言无关，也能区分多个 AI 供应商）
-            crate::store::put_many(lang, &pairs, &id);
+
+            let t_save = Instant::now();
+            if cfg.persist_cache && !to_store.is_empty() {
+                crate::store::put_many_for_app(lang, &app_id, &ctx.app_name, &to_store, &id);
+            }
+            let save_time = t_save.elapsed();
+            for (src, reason) in ok_reason_pairs {
+                filter::record_event(&src, "keep", reason, &fctx);
+            }
+            guard.complete(&done_pairs);
+            used_name = display_name;
+            tlog!(
+                "{who} 翻译 {} 条：过滤 {filter_kept} · 术语表 {glossary_hits} · 译文库 {} 命中 {store_hits} · 引擎【{used_name}】{} 条 {} · 写库 {} · 共 {}",
+                items.len(),
+                secs(store_time),
+                engine_items.len(),
+                secs(api_time),
+                secs(save_time),
+                secs(start.elapsed())
+            );
         }
-        let save_time = t.elapsed();
-        found.extend(pairs);
-        tlog!(
-            "{who} 翻译 {} 条：术语表命中 {glossary_hits} · 译文库 {} 命中 {store_hits} · 引擎【{display_name}】{} 条 {} · 写库 {} · 共 {}",
-            texts.len(),
-            secs(store_time),
-            n,
-            secs(api_time),
-            secs(save_time),
-            secs(start.elapsed())
-        );
-        display_name
+
+        // 等待已在途的其他请求完成
+        for (idx, mut rx) in waiting {
+            loop {
+                if let Some(res) = rx.borrow().clone() {
+                    out[idx] = Some(res?);
+                    break;
+                }
+                if rx.changed().await.is_err() {
+                    return Err("并发请求意外中止".into());
+                }
+            }
+        }
+        used_name
     };
-    Ok((texts.iter().map(|t| found[t].clone()).collect(), engine))
+
+    Ok((
+        out.into_iter()
+            .enumerate()
+            .map(|(i, v)| v.unwrap_or_else(|| TranslatedItem { text: items[i].text.clone(), keep: true }))
+            .collect(),
+        engine,
+    ))
 }
 
 // ───────────────────────── 单项失败冷却 ─────────────────────────
@@ -376,8 +686,17 @@ pub fn cooling_ids() -> Vec<String> {
     ids
 }
 
-/// 按配置的主引擎 + 回退顺序依次尝试批量翻译（不查缓存），返回（译文，引擎 id，显示名）
-async fn translate_by_engines(cfg: &Config, texts: &[String]) -> Result<(Vec<String>, String, String), String> {
+fn is_ai_kind(kind: &str) -> bool {
+    matches!(kind, "openai" | "anthropic" | "gemini")
+}
+
+/// 按配置的主引擎 + 回退顺序依次尝试批量翻译（不查缓存），返回（译文，引擎 id，显示名，是否 AI）
+async fn translate_items_by_engines(
+    cfg: &Config,
+    items: &[TranslateItem],
+    ctx: &BatchContext,
+    keep_terms: &[String],
+) -> Result<(Vec<TranslatedItem>, String, String, bool), String> {
     let chain = cfg.engine_chain();
     let active: Vec<(String, ProviderConfig)> = chain.iter().filter(|(id, _)| !is_cooling(id)).cloned().collect();
     // 全部处于冷却时仍按完整顺序尝试，避免可用节点全部被跳过
@@ -386,32 +705,54 @@ async fn translate_by_engines(cfg: &Config, texts: &[String]) -> Result<(Vec<Str
     let mut errors = Vec::new();
     for (id, provider) in candidates {
         let kind = provider.kind_or(&id);
+        let ai = is_ai_kind(&kind);
+        let conc = provider.effective_concurrency(&kind);
         let display_name = provider_display_name(&id, &provider);
         let start = Instant::now();
-        let (engine, result) = match create(&kind, &provider) {
+        let (engine, result) = match create_with_id(&id, &kind, &provider) {
             Ok(t) => {
-                let r = t.translate_batch(texts, &cfg.target_lang).await;
+                let r = if ai {
+                    // AI 引擎内部每次 chat() 已走 limiter::run_limited
+                    t.translate_items(items, ctx, keep_terms, &cfg.target_lang).await
+                } else {
+                    limiter::run_limited(&id, conc, || t.translate_items(items, ctx, keep_terms, &cfg.target_lang)).await
+                };
                 (Some(t), r)
             }
             Err(e) => (None, Err(e)),
         };
-        if !matches!(&result, Ok(t) if t.len() == texts.len()) {
+        if !matches!(&result, Ok(t) if t.len() == items.len()) {
             tlog!("引擎【{display_name}】失败，改用下一个，已耗时 {}", crate::timing::secs(start.elapsed()));
         }
         match result {
-            Ok(mut t) if t.len() == texts.len() => {
+            Ok(mut out) if out.len() == items.len() => {
+                limiter::gate(&id, conc).on_success();
                 clear_cooldown(&id);
-                if let Some(e) = &engine {
-                    retry_misdetected(e.as_ref(), texts, &mut t, &cfg.target_lang).await;
+                if !ai {
+                    if let Some(e) = &engine {
+                        let texts: Vec<String> = items.iter().map(|it| it.text.clone()).collect();
+                        let mut raw: Vec<String> = out.iter().map(|r| r.text.clone()).collect();
+                        retry_misdetected(e.as_ref(), &texts, &mut raw, &cfg.target_lang).await;
+                        for (res, (orig, tr)) in out.iter_mut().zip(texts.iter().zip(raw)) {
+                            let keep = tr.trim() == orig.trim();
+                            res.text = if keep { orig.clone() } else { tr };
+                            res.keep = keep;
+                        }
+                    }
                 }
-                return Ok((t, id, display_name));
+                return Ok((out, id, display_name, ai));
             }
             Ok(_) => {
-                mark_cooldown(&id);
+                if limiter::gate(&id, conc).on_failure(false) {
+                    mark_cooldown(&id);
+                }
                 errors.push(t!("err.engine.count_mismatch", name = display_name));
             }
             Err(e) => {
-                mark_cooldown(&id);
+                let is_rl = matches!(e, TranslateError::RateLimited { .. });
+                if limiter::gate(&id, conc).on_failure(is_rl) {
+                    mark_cooldown(&id);
+                }
                 errors.push(t!("err.engine.prefixed", name = display_name, e = e));
             }
         }
@@ -468,6 +809,9 @@ async fn retry_misdetected(engine: &dyn Translator, texts: &[String], out: &mut 
 
 /// 大模型接口可用的模型 id（已排序去重）
 pub async fn list_models(kind: &str, cfg: &ProviderConfig) -> Result<Vec<String>, String> {
+    if is_unset_ai(kind) {
+        return Err(t!("err.engine.no_protocol"));
+    }
     let res = match kind {
         "anthropic" => anthropic::list_models(cfg).await,
         "gemini" => gemini::list_models(cfg).await,
@@ -644,10 +988,13 @@ fn network_err(e: reqwest::Error) -> TranslateError {
     TranslateError::Network(msg)
 }
 
-/// 发送请求并解析 JSON；非 2xx 时用 `err_pointer` 指向的字段作为错误信息
+/// 发送请求并解析 JSON；非 2xx 时用 `err_pointer` 指向的字段作为错误信息（429 返回 RateLimited）
 async fn send_json(req: reqwest::RequestBuilder, err_pointer: &str) -> Result<Value, TranslateError> {
     let resp = req.send().await.map_err(network_err)?;
     let status = resp.status();
+    let retry_after = limiter::parse_retry_after(
+        resp.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()),
+    );
     let raw = resp.text().await.map_err(network_err)?;
     let value: Option<Value> = serde_json::from_str(&raw).ok();
     if !status.is_success() {
@@ -657,7 +1004,11 @@ async fn send_json(req: reqwest::RequestBuilder, err_pointer: &str) -> Result<Va
             .and_then(Value::as_str)
             .map(str::to_string)
             .unwrap_or_else(|| raw.chars().take(300).collect());
-        return Err(TranslateError::Api(format!("HTTP {status}：{msg}")));
+        let formatted = format!("HTTP {status}：{msg}");
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(TranslateError::RateLimited { message: formatted, retry_after });
+        }
+        return Err(TranslateError::Api(formatted));
     }
     value.ok_or_else(|| TranslateError::Api(t!("err.engine.not_json", body = raw.chars().take(300).collect::<String>())))
 }

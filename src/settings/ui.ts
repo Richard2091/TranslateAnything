@@ -137,8 +137,45 @@ export function emptyState(text: string, ic: IconName = "box"): HTMLElement {
 
 export function switchEl(checked: boolean, onChange: (v: boolean) => void, disabled = false): HTMLLabelElement {
   const input = h("input", { type: "checkbox", checked, disabled });
-  input.addEventListener("change", () => onChange(input.checked));
-  return h("label", { class: "switch" }, input, h("i"));
+  const label = h("label", { class: "switch" }, input, h("i"));
+  input.addEventListener("change", () => {
+    lastSwitch = { el: label, checked: input.checked, at: performance.now() };
+    onChange(input.checked);
+  });
+  return label;
+}
+
+/** 最近一次拨动的开关；拨动后保存配置会重绘整页、换掉开关元素，靠它让新开关接着把动画放完 */
+let lastSwitch: { el: HTMLElement; checked: boolean; at: number } | null = null;
+const SWITCH_ANIM_MS = 420;
+
+/** 开关在重绘前后的对应关系：引擎行按行 id，其余按在当前页里的顺序 */
+function switchKey(el: HTMLElement): string {
+  const row = el.closest<HTMLElement>("[data-id]");
+  if (row) return `id:${row.dataset.id}`;
+  const scope = el.closest(".tab") ?? document;
+  return `n:${[...scope.querySelectorAll(".switch")].indexOf(el)}`;
+}
+
+/**
+ * 重绘前调用：记下刚拨动、动画还没放完的开关；返回的函数在重绘后调用，
+ * 让新开关从已经过去的时间点接着播放（负的 animation-delay）。
+ */
+export function keepSwitchMotion(): () => void {
+  const s = lastSwitch;
+  if (!s || !s.el.isConnected) return () => {};
+  const elapsed = performance.now() - s.at;
+  if (elapsed > SWITCH_ANIM_MS) return () => {};
+  const key = switchKey(s.el);
+  return () => {
+    const scope = document.querySelector(".tab.active") ?? document;
+    const next = [...scope.querySelectorAll<HTMLElement>(".switch")].find((el) => el !== s.el && switchKey(el) === key);
+    if (!next || next.querySelector("input")?.checked !== s.checked) return;
+    next.style.setProperty("--sw-delay", `${-elapsed}ms`);
+    next.classList.add(s.checked ? "sw-on" : "sw-off");
+    next.addEventListener("animationend", () => next.classList.remove("sw-on", "sw-off"), { once: true });
+    lastSwitch = { el: next, checked: s.checked, at: s.at };
+  };
 }
 
 export function field(label: string, control: HTMLElement, cls = ""): HTMLLabelElement {
@@ -152,6 +189,7 @@ export function segmented<T extends string>(
   onChange: (v: T) => void,
   disabled: T[] = [],
 ): HTMLElement {
+  let current = value;
   const box = h("div", { class: "segmented", role: "radiogroup" });
   const thumb = h("span", { class: "seg-thumb", "aria-hidden": "true" });
   box.append(thumb);
@@ -161,6 +199,7 @@ export function segmented<T extends string>(
     thumb.style.width = `${on.offsetWidth}px`;
     thumb.style.transform = `translateX(${on.offsetLeft}px)`;
   };
+  const segKey = options.map(([v]) => v).join("|");
   for (const [v, label] of options) {
     const b = h(
       "button",
@@ -171,8 +210,14 @@ export function segmented<T extends string>(
         "aria-checked": String(v === value),
         disabled: disabled.includes(v),
         onclick: () => {
-          if (v === value) return;
-          for (const x of box.querySelectorAll("button")) x.classList.toggle("on", x === b);
+          if (v === current) return;
+          current = v;
+          // 切换后保存配置多半会重绘整页，记下滑块原位置，让新组件从这里滑过去
+          lastSeg = { key: segKey, transform: thumb.style.transform, width: thumb.style.width, at: performance.now() };
+          for (const x of box.querySelectorAll("button")) {
+            x.classList.toggle("on", x === b);
+            x.setAttribute("aria-checked", String(x === b));
+          }
           place();
           onChange(v);
         },
@@ -181,14 +226,24 @@ export function segmented<T extends string>(
     );
     box.append(b);
   }
-  // 放进页面、排版完成后再定位滑块（首次不播放动画）
+  // 放进页面、排版完成后再定位滑块：首次直接就位；若是刚切换引起的重绘，从旧位置滑过去
   requestAnimationFrame(() => {
+    const from = lastSeg && lastSeg.key === segKey && performance.now() - lastSeg.at < 450 ? lastSeg : null;
     thumb.style.transition = "none";
-    place();
-    requestAnimationFrame(() => (thumb.style.transition = ""));
+    if (from) {
+      thumb.style.transform = from.transform;
+      thumb.style.width = from.width;
+      lastSeg = null;
+    } else place();
+    void thumb.offsetWidth;
+    thumb.style.transition = "";
+    if (from) place();
   });
   return box;
 }
+
+/** 最近一次分段选择器切换前的滑块位置（见 segmented） */
+let lastSeg: { key: string; transform: string; width: string; at: number } | null = null;
 
 export interface DropOption<T extends string> {
   value: T;
@@ -196,6 +251,8 @@ export interface DropOption<T extends string> {
   /** 选项下方的小字说明 */
   hint?: string;
   disabled?: boolean;
+  /** 只参与搜索、不显示的文字（如程序路径） */
+  keywords?: string;
 }
 
 let openDrop: (() => void) | null = null;
@@ -595,6 +652,161 @@ export function dropdown<T extends string>(
   return trigger;
 }
 
+/**
+ * 可搜索的下拉选择：外观是输入框，聚焦即展开全部选项，输入时实时按名称 / 值 / 提示 / keywords 筛选。
+ * 只能选列表里的项；失焦或 Esc 时输入框还原成当前选中项的名称。
+ * 给了 `empty` 时表示“不选”（如全部软件）：输入框清空即回到它，此时只显示占位提示；选中某项后右侧按钮变成 × 用来清除。
+ */
+export function searchSelect<T extends string>(
+  options: DropOption<T>[],
+  value: T,
+  onChange: (v: T) => void,
+  opts: { placeholder?: string; width?: string; key?: string; empty?: T } = {},
+): HTMLElement {
+  let current = value;
+  let pop: HTMLElement | null = null;
+  let shown: DropOption<T>[] = [];
+  let active = 0;
+  const hasEmpty = opts.empty !== undefined;
+  const labelOf = (v: T) => options.find((o) => o.value === v)?.label ?? "";
+  const input = h("input", { type: "text", value: labelOf(current), placeholder: opts.placeholder, "data-k": opts.key, autocomplete: "off", spellcheck: false });
+  const btn = h("button", { type: "button", class: "input-icon", tabIndex: -1 });
+  const wrap = h("div", { class: "input-wrap combo select", style: opts.width ? `width:${opts.width}` : undefined }, input, btn);
+  /** 有选中项且允许清空时按钮是 ×，否则是展开箭头 */
+  const clearable = () => hasEmpty && current !== opts.empty;
+  const syncBtn = () => {
+    const x = clearable();
+    btn.replaceChildren(icon(x ? "x" : "down"));
+    const label = x ? t("common.clear") : t("common.showOptions");
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+    wrap.classList.toggle("has-value", x);
+  };
+  syncBtn();
+  const setValue = (v: T) => {
+    const changed = v !== current;
+    current = v;
+    syncBtn();
+    if (changed) onChange(v);
+  };
+
+  const close = (restore = true) => {
+    if (restore) input.value = labelOf(current);
+    if (!pop) return;
+    const p = pop;
+    pop = null;
+    wrap.classList.remove("open");
+    p.classList.add("leaving");
+    afterLeave(p, () => p.remove());
+    document.removeEventListener("pointerdown", onOutside, true);
+    window.removeEventListener("resize", onDismiss);
+    document.querySelector("main")?.removeEventListener("scroll", onDismiss);
+    if (openDrop === onDismiss) openDrop = null;
+  };
+  const onDismiss = () => close();
+  const onOutside = (e: Event) => {
+    if (!wrap.contains(e.target as Node) && !pop?.contains(e.target as Node)) close();
+  };
+  const choose = (o: DropOption<T> | undefined) => {
+    if (!o || o.disabled) return;
+    close(false);
+    setValue(o.value);
+    input.value = o.label;
+    input.blur();
+  };
+  /** 清空输入后提交：回到“不选” */
+  const clearToEmpty = () => {
+    if (!hasEmpty) return false;
+    input.value = "";
+    close(false);
+    setValue(opts.empty as T);
+    return true;
+  };
+  const setActive = (i: number) => {
+    active = i;
+    if (!pop) return;
+    const items = [...pop.querySelectorAll<HTMLElement>(".dd-item[role=option]")];
+    items.forEach((el, j) => el.classList.toggle("active", j === i));
+    const el = items[i];
+    if (el) {
+      if (el.offsetTop < pop.scrollTop) pop.scrollTop = el.offsetTop - 5;
+      else if (el.offsetTop + el.offsetHeight > pop.scrollTop + pop.clientHeight) pop.scrollTop = el.offsetTop + el.offsetHeight - pop.clientHeight + 5;
+    }
+  };
+
+  /** 按输入筛选并重画；`all` 为 true 时显示全部（刚聚焦、输入框里还是当前项名称时） */
+  const render = (all: boolean) => {
+    const terms = all ? [] : input.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    shown = options.filter((o) => {
+      const hay = `${o.label}\n${o.value}\n${o.hint ?? ""}\n${o.keywords ?? ""}`.toLowerCase();
+      return terms.every((w) => hay.includes(w));
+    });
+    const children = shown.length
+      ? shown.map((o, i) =>
+          h(
+            "div",
+            { class: `dd-item${o.value === current ? " selected" : ""}${o.disabled ? " disabled" : ""}`, role: "option", onpointerenter: () => setActive(i), onclick: () => choose(o) },
+            h("div", { class: "grow" }, h("div", {}, o.label), o.hint && h("div", { class: "dd-hint" }, o.hint)),
+            o.value === current && h("span", { class: "dd-check" }, icon("check")),
+          ),
+        )
+      : [h("div", { class: "dd-item disabled" }, h("div", { class: "grow dd-hint" }, t("common.noMatch")))];
+    if (!pop) {
+      openDrop?.();
+      pop = h("div", { class: "dd-pop", role: "listbox" });
+      // 点选项时不让输入框先失焦
+      pop.addEventListener("pointerdown", (e) => e.preventDefault());
+      document.body.append(pop);
+      wrap.classList.add("open");
+      openDrop = onDismiss;
+      document.addEventListener("pointerdown", onOutside, true);
+      window.addEventListener("resize", onDismiss);
+      document.querySelector("main")?.addEventListener("scroll", onDismiss, { passive: true });
+    }
+    pop.replaceChildren(...children);
+    placePop(pop, wrap);
+    setActive(Math.max(0, all ? shown.findIndex((o) => o.value === current) : 0));
+  };
+
+  input.addEventListener("focus", () => {
+    input.select();
+    render(true);
+  });
+  input.addEventListener("input", () => render(false));
+  input.addEventListener("blur", () => {
+    if (!input.value.trim() && clearToEmpty()) return;
+    close();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      if (!pop) return render(true);
+      if (shown.length) setActive((active + (e.key === "ArrowDown" ? 1 : shown.length - 1)) % shown.length);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!input.value.trim() && hasEmpty) {
+        clearToEmpty();
+        input.blur();
+      } else choose(shown[active]);
+    } else if (e.key === "Escape" && pop) {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+      input.blur();
+    }
+  });
+  btn.addEventListener("pointerdown", (e) => e.preventDefault());
+  btn.addEventListener("click", () => {
+    if (clearable()) {
+      clearToEmpty();
+      input.blur();
+    } else if (pop) close();
+    else if (document.activeElement === input) render(true);
+    else input.focus(); // 聚焦时会展开
+  });
+  return wrap;
+}
+
 /** 字节数换算成易读的大小 */
 export function fileSize(bytes: number): string {
   if (bytes <= 0) return "0 B";
@@ -602,6 +814,44 @@ export function fileSize(bytes: number): string {
   const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
   const n = bytes / 1024 ** i;
   return `${n >= 100 || i === 0 ? Math.round(n) : n.toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * 可折叠区域：高度平滑展开 / 收起（grid 行高 0fr ↔ 1fr，不用量高度），内容略微下滑淡入。
+ * 直接渲染出来的是展开状态；用 expand / collapse 播放动画。
+ */
+export function collapsible(content: HTMLElement): HTMLElement {
+  return h("div", { class: "collapse" }, h("div", { class: "collapse-inner" }, content));
+}
+
+/** 等 grid 行高过渡结束；动画被关掉（时长为 0）时靠兜底计时 */
+function afterRows(el: HTMLElement, fn: () => void) {
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    el.removeEventListener("transitionend", onEnd);
+    fn();
+  };
+  const onEnd = (e: TransitionEvent) => e.target === el && e.propertyName === "grid-template-rows" && finish();
+  el.addEventListener("transitionend", onEnd);
+  window.setTimeout(finish, 450);
+}
+
+/** 从收起展开到内容高度 */
+export function expand(el: HTMLElement) {
+  el.classList.add("closed", "moving");
+  void el.offsetHeight;
+  el.classList.remove("closed");
+  afterRows(el, () => !el.classList.contains("closed") && el.classList.remove("moving"));
+}
+
+/** 收起；收完后调用 done（期间又被展开则不调用） */
+export function collapse(el: HTMLElement, done?: () => void) {
+  el.classList.add("moving");
+  void el.offsetHeight;
+  el.classList.add("closed");
+  afterRows(el, () => el.classList.contains("closed") && done?.());
 }
 
 /** 等退场动画放完再执行 fn（动画关闭时立即执行） */

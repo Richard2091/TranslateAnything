@@ -1,7 +1,8 @@
 //! Google Gemini 原生协议：POST `{base_url}/v1beta/models/{model}:generateContent`
 
+use super::limiter;
 use super::llm::{self, LlmChat};
-use super::{TranslateError, Translator, build_client, parse_err, require_key, send_json};
+use super::{BatchContext, TranslateError, TranslateItem, TranslatedItem, Translator, build_client, parse_err, require_key, send_json};
 use crate::config::ProviderConfig;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -9,13 +10,20 @@ use serde_json::{Value, json};
 pub const DEFAULT_BASE: &str = "https://generativelanguage.googleapis.com";
 
 pub struct Gemini {
+    engine_id: String,
+    concurrency: usize,
     client: reqwest::Client,
     url: String,
     api_key: String,
 }
 
 impl Gemini {
+    #[allow(dead_code)]
     pub fn new(cfg: &ProviderConfig) -> Result<Self, TranslateError> {
+        Self::new_with_id("gemini", cfg)
+    }
+
+    pub fn new_with_id(id: &str, cfg: &ProviderConfig) -> Result<Self, TranslateError> {
         let api_key = require_key(cfg, "Gemini API key")?;
         let model = cfg.model.trim().trim_start_matches("models/");
         if model.is_empty() {
@@ -23,6 +31,8 @@ impl Gemini {
         }
         let root = api_root(&cfg.base_url);
         Ok(Self {
+            engine_id: id.to_string(),
+            concurrency: cfg.effective_concurrency("gemini"),
             client: build_client(cfg)?,
             url: format!("{root}/models/{model}:generateContent"),
             api_key,
@@ -71,16 +81,20 @@ fn extract_content(v: &Value) -> Result<String, TranslateError> {
 #[async_trait]
 impl LlmChat for Gemini {
     async fn chat(&self, system: &str, user: &str, _max_tokens: u32) -> Result<String, TranslateError> {
-        let req = self
-            .client
-            .post(&self.url)
-            .header("x-goog-api-key", &self.api_key)
-            .json(&json!({
-                "systemInstruction": { "parts": [{ "text": system }] },
-                "contents": [{ "role": "user", "parts": [{ "text": user }] }],
-                "generationConfig": { "temperature": 0.2 },
-            }));
-        let v = send_json(req, "/error/message").await.map_err(|e| llm::auth_hint(e, &self.url, &self.api_key))?;
+        let v = limiter::run_limited(&self.engine_id, self.concurrency, || {
+            let req = self
+                .client
+                .post(&self.url)
+                .header("x-goog-api-key", &self.api_key)
+                .json(&json!({
+                    "systemInstruction": { "parts": [{ "text": system }] },
+                    "contents": [{ "role": "user", "parts": [{ "text": user }] }],
+                    "generationConfig": { "temperature": 0.2 },
+                }));
+            async move { send_json(req, "/error/message").await }
+        })
+        .await
+        .map_err(|e| llm::auth_hint(e, &self.url, &self.api_key))?;
         extract_content(&v)
     }
 }
@@ -114,6 +128,16 @@ impl Translator for Gemini {
 
     async fn translate_batch(&self, texts: &[String], target_lang: &str) -> Result<Vec<String>, TranslateError> {
         llm::translate_batch(self, texts, target_lang).await
+    }
+
+    async fn translate_items(
+        &self,
+        items: &[TranslateItem],
+        ctx: &BatchContext,
+        keep_terms: &[String],
+        target_lang: &str,
+    ) -> Result<Vec<TranslatedItem>, TranslateError> {
+        llm::translate_items(self, items, ctx, keep_terms, target_lang).await
     }
 }
 

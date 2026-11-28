@@ -330,7 +330,8 @@ pub fn frame_set_click_through(window: WebviewWindow, state: tauri::State<'_, Li
 /// 后台任务（OCR、翻译）与实时循环之间的共享状态
 #[derive(Default)]
 struct Shared {
-    cache: HashMap<String, String>,
+    /// 按 `(app_id, 原文)` 隔离的内存译文缓存，避免跨软件移动翻译框时短词串味
+    cache: HashMap<(String, String), String>,
     in_flight: bool,
     epoch: u32,
     error: Option<String>,
@@ -342,6 +343,13 @@ struct Shared {
     ocr_done: Option<OcrDone>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct BlockApp {
+    app_id: String,
+    app_name: String,
+    title: String,
+}
+
 struct OcrDone {
     epoch: u32,
     base: [i32; 2],
@@ -349,7 +357,37 @@ struct OcrDone {
     frame: Arc<Frame>,
     /// 截图裁剪偏移
     off: (i32, i32),
-    result: Result<Vec<Block>, String>,
+    result: Result<(Vec<Block>, Vec<BlockApp>), String>,
+}
+
+fn resolve_window(windows: &[capture::WindowLayer], cx: f32, cy: f32) -> BlockApp {
+    let hit = windows
+        .iter()
+        .find(|w| {
+            let (wx, wy, ww, wh) = w.rect;
+            cx >= wx as f32 && cx <= (wx + ww) as f32 && cy >= wy as f32 && cy <= (wy + wh) as f32
+        })
+        .or_else(|| windows.first());
+    match hit {
+        Some(w) => BlockApp {
+            app_id: w.app_id.clone(),
+            app_name: w.app_name.clone(),
+            title: w.title.clone(),
+        },
+        None => BlockApp::default(),
+    }
+}
+
+fn block_role(b: &Block) -> Option<String> {
+    if b.heading {
+        Some("h".into())
+    } else if b.marker.is_some() {
+        Some("list".into())
+    } else if b.lines == 1 && b.align == "center" {
+        Some("btn".into())
+    } else {
+        None
+    }
 }
 
 async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
@@ -360,6 +398,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
     let mut last_scale = 1.0;
     // 当前版面及其基准滚动量
     let mut blocks: Vec<Block> = Vec::new();
+    let mut block_apps: Vec<BlockApp> = Vec::new();
     // 与 blocks 一一对应：随滚动平移还是钉在屏幕上
     let mut anchors: Vec<Anchor> = Vec::new();
     let mut base = [0i32; 2];
@@ -455,6 +494,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             total = [0, 0];
             base = [0, 0];
             blocks.clear();
+            block_apps.clear();
             anchors.clear();
             {
                 if let Some(task) = translation_task.take() { task.abort(); }
@@ -481,15 +521,15 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                 let cap_time = t.elapsed();
                 let t = Instant::now();
                 let frame = Frame::from_rgba(&s.image);
-                (s.image, frame, s.ox, s.oy, s.at, cap_time, t.elapsed())
+                (s.image, frame, s.ox, s.oy, s.at, s.windows, cap_time, t.elapsed())
             })
         })
         .await;
         if revision != ctl.geometry.lock().unwrap().revision || ctl.paused.load(Ordering::Relaxed) {
             continue;
         }
-        let (image, frame, ox, oy, shot_at, cap_time, gray_time) = match shot {
-            Ok(Ok((image, frame, ox, oy, at, c, g))) => (image, Arc::new(frame), ox, oy, at, c, g),
+        let (image, frame, ox, oy, shot_at, windows, cap_time, gray_time) = match shot {
+            Ok(Ok((image, frame, ox, oy, at, windows, c, g))) => (image, Arc::new(frame), ox, oy, at, windows, c, g),
             Ok(Err(e)) => {
                 ocr_error = Some(e);
                 ocr_stale = true;
@@ -547,7 +587,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         if let Some(done) = s.ocr_done.take() {
             if done.epoch == epoch {
                 match done.result {
-                    Ok(b) => {
+                    Ok((b, b_apps)) => {
                         // 上一版里钉住的块：同样的文字出现在同一位置的继续钉住，下次滚动时不必先漂一下再纠正
                         let mut next: Vec<Anchor> = b
                             .iter()
@@ -564,6 +604,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                             reclassify(&b, &mut next, (&*done.frame, &**p), d, (done.base, total, done.base), done.off);
                         }
                         blocks = b;
+                        block_apps = b_apps;
                         anchors = next;
                         base = done.base;
                         ocr_error = None;
@@ -582,12 +623,33 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             let (shared, ctl, ocr_base, ocr_epoch, ocr_frame) = (shared.clone(), ctl.clone(), total, epoch, frame.clone());
             tauri::async_runtime::spawn_blocking(move || {
                 let cfg = config::load().unwrap_or_default();
-                let skip_cjk = cfg.target_lang.to_ascii_lowercase().starts_with("zh");
                 let t = Instant::now();
                 let result = ocr::recognize(&image, &cfg.ocr_lang, &cfg.target_lang).map(|out| {
                     let ocr_time = t.elapsed();
                     let t = Instant::now();
-                    let mut blocks = layout::build_blocks(&out, &image, skip_cjk);
+                    let mut blocks = layout::build_blocks_for(
+                        &out,
+                        &image,
+                        &cfg,
+                        |cx, cy| {
+                            let hit = windows
+                                .iter()
+                                .find(|w| {
+                                    let (wx, wy, ww, wh) = w.rect;
+                                    cx >= wx as f32 && cx <= (wx + ww) as f32 && cy >= wy as f32 && cy <= (wy + wh) as f32
+                                })
+                                .or_else(|| windows.first());
+                            match hit {
+                                Some(w) => (w.app_id.as_str(), w.app_name.as_str()),
+                                None => ("", ""),
+                            }
+                        },
+                        true,
+                    );
+                    let apps: Vec<BlockApp> = blocks
+                        .iter()
+                        .map(|b| resolve_window(&windows, b.x + b.w / 2.0, b.y + b.h / 2.0))
+                        .collect();
                     tlog!(
                         "悬浮窗 {}×{}：截屏 {} · 灰度化 {} · 画面比对 {} · OCR {}（{} 行）· 分段 {}（{} 段）",
                         image.width(),
@@ -605,7 +667,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                         b.x += ox as f32;
                         b.y += oy as f32;
                     }
-                    blocks
+                    (blocks, apps)
                 });
                 let mut s = shared.lock().unwrap();
                 s.ocr_busy = false;
@@ -621,15 +683,30 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             });
         }
 
-        // 新出现的文字：批量请求翻译（同一时间只有一个请求在途）
-        let mut seen = HashSet::new();
-        let missing: Vec<String> = blocks
-            .iter()
-            .map(|b| b.source.clone())
-            .filter(|t| !s.cache.contains_key(t) && seen.insert(t.clone()))
-            .collect();
+        // 新出现的文字：按应用与顺序分组后批量请求翻译（同一时间只有一个请求在途）
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut grouped: Vec<(BlockApp, Vec<translate::TranslateItem>)> = Vec::new();
+        for (b, app_info) in blocks.iter().zip(&block_apps) {
+            let key = (app_info.app_id.clone(), b.source.clone());
+            if s.cache.contains_key(&key) || !seen.insert(key) {
+                continue;
+            }
+            let item = translate::TranslateItem {
+                text: b.source.clone(),
+                role: block_role(b),
+                group: None,
+            };
+            if let Some((_, items)) = grouped
+                .iter_mut()
+                .find(|(a, _)| a.app_id == app_info.app_id && a.title == app_info.title)
+            {
+                items.push(item);
+            } else {
+                grouped.push((app_info.clone(), vec![item]));
+            }
+        }
         let can_retry = s.failed_at.is_none_or(|t| t.elapsed() > RETRY_AFTER);
-        if !missing.is_empty() && !s.in_flight && can_retry {
+        if !grouped.is_empty() && !s.in_flight && can_retry {
             s.in_flight = true;
             s.error = None;
             ctl.dirty.store(true, Ordering::Relaxed);
@@ -637,19 +714,36 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             let (shared, ctl) = (shared.clone(), ctl.clone());
             translation_task = Some(tauri::async_runtime::spawn(async move {
                 let cfg = config::load().unwrap_or_default();
-                let result = tokio::time::timeout(
-                    Duration::from_secs(90),
-                    translate::translate_batch_with_fallback(&cfg, &missing, "悬浮窗"),
-                ).await.unwrap_or_else(|_| Err(t!("err.engine.timeout")));
+                let fut = async {
+                    let mut out_pairs: Vec<((String, String), String)> = Vec::new();
+                    let mut last_engine = String::new();
+                    for (app_info, items) in grouped {
+                        let ctx = translate::BatchContext {
+                            mode: translate::SourceMode::Ocr,
+                            app_id: app_info.app_id.clone(),
+                            app_name: app_info.app_name.clone(),
+                            title: app_info.title.clone(),
+                        };
+                        let (translated, engine) = translate::translate_items_with_fallback(&cfg, &items, &ctx, "悬浮窗").await?;
+                        last_engine = engine;
+                        for (it, tr) in items.into_iter().zip(translated) {
+                            out_pairs.push(((app_info.app_id.clone(), it.text), tr.text));
+                        }
+                    }
+                    Ok::<_, String>((out_pairs, last_engine))
+                };
+                let result = tokio::time::timeout(Duration::from_secs(90), fut)
+                    .await
+                    .unwrap_or_else(|_| Err(t!("err.engine.timeout")));
                 let mut s = shared.lock().unwrap();
                 if s.epoch != request_epoch { return; }
                 s.in_flight = false;
                 match result {
-                    Ok((texts, engine)) => {
+                    Ok((pairs, engine)) => {
                         if s.cache.len() > CACHE_LIMIT {
                             s.cache.clear();
                         }
-                        s.cache.extend(missing.into_iter().zip(texts));
+                        s.cache.extend(pairs);
                         s.error = None;
                         s.failed_at = None;
                         s.engine = Some(engine);
@@ -669,6 +763,7 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
         if !layout_changed && !dirty && was_recognizing == s.ocr_busy {
             continue;
         }
+        let app_of = |idx: usize| block_apps.get(idx).map_or("", |a| a.app_id.as_str()).to_string();
         let payload = LayoutPayload {
             epoch,
             base,
@@ -676,8 +771,9 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
             blocks: blocks
                 .iter()
                 .zip(&anchors)
-                .map(|(b, a)| {
-                    let translated = s.cache.get(&b.source);
+                .enumerate()
+                .map(|(idx, (b, a))| {
+                    let translated = s.cache.get(&(app_of(idx), b.source.clone()));
                     RenderBlock {
                         block: Block { x: a.x, y: a.y, ..b.clone() },
                         text: translated.cloned().unwrap_or_default(),
@@ -686,7 +782,11 @@ async fn live_loop(app: AppHandle, label: String, ctl: Arc<FrameCtl>) {
                     }
                 })
                 .collect(),
-            pending: blocks.iter().filter(|b| !s.cache.contains_key(&b.source)).count(),
+            pending: blocks
+                .iter()
+                .enumerate()
+                .filter(|(idx, b)| !s.cache.contains_key(&(app_of(*idx), b.source.clone())))
+                .count(),
             recognizing: s.ocr_busy,
             error: ocr_error.clone().or_else(|| s.error.clone()),
             engine: s.engine.clone(),

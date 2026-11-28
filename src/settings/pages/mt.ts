@@ -15,7 +15,7 @@ import {
 } from "../state";
 import { t } from "../../i18n";
 import { h, icon, pageHead, section, switchEl, toast } from "../ui";
-import { paramFields, sortable, statusBanner, testButton, testNote } from "./engineShared";
+import { paramFields, sortable, statusBanner, testButton, testNote, wireParams } from "./engineShared";
 
 /** 展开了参数区的引擎（只在本次打开设置窗口期间记住） */
 const opened = new Set<string>();
@@ -92,32 +92,20 @@ function engineRow(id: string, chain: string[]): HTMLElement {
   const sw = switchEl(on, (v) => void (v ? enable(id, name) : disable(id, name)), busy || last);
   sw.title = last ? t("engines.order.keepOne") : on ? t("engines.order.off") : t("engines.order.on");
 
-  const row = h(
-    "div",
-    { class: `engine-row${on ? " on" : ""}${open ? " open" : ""}`, "data-id": id },
-    grip,
-    h(
-      "button",
-      {
-        class: `engine-pick${fields.length ? "" : " static"}`,
-        type: "button",
-        "aria-expanded": fields.length ? String(open) : undefined,
-        title: fields.length ? t("engines.order.params") : undefined,
-        onclick: () => {
-          if (!fields.length) return;
-          if (opened.has(id)) opened.delete(id);
-          else opened.add(id);
-          refresh();
-        },
-      },
-      h("span", { class: "engine-num" }, on ? String(pos + 1) : ""),
-      h("div", { class: "grow" }, h("div", { class: "engine-name" }, name, ...tags(id, kind)), h("div", { class: "desc" }, info?.note ?? "")),
-      fields.length > 0 && h("span", { class: "engine-chev" }, icon("down")),
-    ),
-    testButton(id),
-    sw,
+  const pick = h(
+    "button",
+    {
+      class: `engine-pick${fields.length ? "" : " static"}`,
+      type: "button",
+      "aria-expanded": fields.length ? String(open) : undefined,
+      title: fields.length ? t("engines.order.params") : undefined,
+    },
+    h("span", { class: "engine-num" }, on ? String(pos + 1) : ""),
+    h("div", { class: "grow" }, h("div", { class: "engine-name" }, name, ...tags(id, kind)), h("div", { class: "desc" }, info?.note ?? "")),
+    fields.length > 0 && h("span", { class: "engine-chev" }, icon("down")),
   );
-  if (open) row.append(h("div", { class: "engine-params pop-in" }, paramFields(id, fields), testNote(id)));
+  const row = h("div", { class: `engine-row${on ? " on" : ""}${open ? " open" : ""}`, "data-id": id }, grip, pick, testButton(id), sw);
+  if (fields.length) wireParams(row, pick, id, opened, () => h("div", { class: "engine-params" }, paramFields(id, fields)));
   else {
     const n = testNote(id, "");
     if (n) row.append(h("div", { class: "engine-params" }, n));

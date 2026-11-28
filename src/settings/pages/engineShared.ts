@@ -2,14 +2,14 @@
 import { invoke } from "@tauri-apps/api/core";
 import { S, cfg, engineInfo, kindOf, refresh, saveConfig, saving, settled, testEngine, type ProviderConfig } from "../state";
 import { t } from "../../i18n";
-import { combo, dropdown, field, fmtSec, h, icon, type DropOption } from "../ui";
+import { collapse, collapsible, combo, dropdown, expand, field, fmtSec, h, icon, type DropOption } from "../ui";
 
 /** 可配置的参数；标签和提示文字取 engines.field.<参数>.label / .ph */
-const FIELDS = new Set(["base_url", "api_key", "region", "model", "proxy"]);
+const FIELDS = new Set(["base_url", "api_key", "region", "model", "concurrency", "proxy"]);
 const SECRET = new Set(["api_key"]);
 const LLM_PLACEHOLDER = new Set(["base_url"]);
 
-export const blankProvider = (): ProviderConfig => ({ name: "", base_url: "", api_key: "", region: "", model: "", proxy: null });
+export const blankProvider = (): ProviderConfig => ({ name: "", base_url: "", api_key: "", region: "", model: "", proxy: null, concurrency: null });
 
 /** DeepL 免费版地址（免费版密钥以 :fx 结尾） */
 const DEEPL_FREE = "https://api-free.deepl.com";
@@ -19,7 +19,290 @@ export function setParam(id: string, key: string, raw: string) {
   return saveConfig((c) => {
     const p = (c.engines[id] ??= blankProvider());
     if (key === "proxy") p.proxy = v || null;
-    else if (key === "proxy") {
+    else if (key === "concurrency") {
+      const n = Number(v);
+      p.concurrency = v && Number.isFinite(n) && n >= 1 ? Math.min(16, Math.round(n)) : null;
+    } else (p as unknown as Record<string, string>)[key] = v;
+  });
+}
+
+export function hostOf(url: string): string {
+  const s = url.trim();
+  if (!s) return "";
+  try {
+    return new URL(s).host;
+  } catch {
+    return s;
+  }
+}
+
+export function protocolLabel(kind: string): string {
+  if (kind === "anthropic") return t("engines.protocol.anthropic");
+  if (kind === "gemini") return t("engines.protocol.gemini");
+  if (kind === "openai") return t("engines.protocol.openai");
+  return t("ai.custom.noProtocol");
+}
+
+export function protocolOptions(): DropOption<string>[] {
+  return [
+    { value: "openai", label: t("engines.protocol.openai"), hint: "/chat/completions" },
+    { value: "anthropic", label: t("engines.protocol.anthropic"), hint: "/v1/messages" },
+    { value: "gemini", label: t("engines.protocol.gemini"), hint: "/v1beta/models/*:generateContent" },
+  ];
+}
+
+export interface AiPreset {
+  id: string;
+  name?: string;
+  nameKey?: string;
+  kind: "openai" | "anthropic" | "gemini";
+  baseUrl: string;
+  hint: string;
+  /** 按来源分组：模型厂商 / 三方平台 / 本地模型 / 自定义；协议是实现细节，不作分组依据 */
+  group: "vendor" | "platform" | "local" | "custom";
+  /** 搜索用的别名（中英文名、产品名），不显示；前端只拿得到当前语言的文案，另一种语言的名称靠这里补 */
+  keywords?: string;
+}
+
+export const AI_PRESETS: AiPreset[] = [
+  { id: "openai", name: "OpenAI", kind: "openai", baseUrl: "https://api.openai.com/v1", hint: "https://api.openai.com/v1", group: "vendor", keywords: "ChatGPT GPT" },
+  { id: "anthropic", name: "Anthropic Claude", kind: "anthropic", baseUrl: "", hint: "https://api.anthropic.com", group: "vendor" },
+  { id: "gemini", name: "Google Gemini", kind: "gemini", baseUrl: "", hint: "https://generativelanguage.googleapis.com", group: "vendor", keywords: "谷歌" },
+  { id: "deepseek", name: "DeepSeek", kind: "openai", baseUrl: "https://api.deepseek.com/v1", hint: "https://api.deepseek.com/v1", group: "vendor", keywords: "深度求索" },
+  { id: "dashscope", nameKey: "engines.preset.dashscope", kind: "openai", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", hint: "dashscope.aliyuncs.com", group: "vendor", keywords: "阿里云百炼 通义千问 Alibaba Cloud Model Studio Qwen Bailian" },
+  { id: "volcengine", nameKey: "engines.preset.volcengine", kind: "openai", baseUrl: "https://ark.cn-beijing.volces.com/api/v3", hint: "ark.cn-beijing.volces.com", group: "vendor", keywords: "火山方舟 豆包 字节跳动 Volcengine Ark Doubao ByteDance" },
+  { id: "zhipu", nameKey: "engines.preset.zhipu", kind: "openai", baseUrl: "https://open.bigmodel.cn/api/paas/v4", hint: "open.bigmodel.cn", group: "vendor", keywords: "智谱 Zhipu GLM ChatGLM" },
+  { id: "moonshot", nameKey: "engines.preset.moonshot", kind: "openai", baseUrl: "https://api.moonshot.cn/v1", hint: "api.moonshot.cn", group: "vendor", keywords: "月之暗面 Moonshot Kimi" },
+  { id: "mistral", name: "Mistral", kind: "openai", baseUrl: "https://api.mistral.ai/v1", hint: "api.mistral.ai", group: "vendor" },
+  { id: "xai", name: "xAI Grok", kind: "openai", baseUrl: "https://api.x.ai/v1", hint: "api.x.ai", group: "vendor" },
+  { id: "openrouter", name: "OpenRouter", kind: "openai", baseUrl: "https://openrouter.ai/api/v1", hint: "openrouter.ai", group: "platform" },
+  { id: "siliconflow", nameKey: "engines.preset.siliconflow", kind: "openai", baseUrl: "https://api.siliconflow.cn/v1", hint: "api.siliconflow.cn", group: "platform", keywords: "硅基流动 SiliconFlow" },
+  { id: "ollama", nameKey: "engines.preset.ollama", kind: "openai", baseUrl: "http://localhost:11434/v1", hint: "http://localhost:11434/v1", group: "local", keywords: "Ollama 本地 local" },
+  { id: "lmstudio", nameKey: "engines.preset.lmstudio", kind: "openai", baseUrl: "http://localhost:1234/v1", hint: "http://localhost:1234/v1", group: "local", keywords: "LM Studio 本地 local" },
+  { id: "custom", nameKey: "engines.preset.custom", kind: "openai", baseUrl: "", hint: "", group: "custom", keywords: "自定义 Custom" },
+];
+
+export const presetName = (p: AiPreset): string => p.name ?? (p.nameKey ? t(p.nameKey) : p.id);
+
+/** 已配置的供应商对应哪个预设（用来显示 logo）：按接口地址的域名匹配，地址留空的按协议找官方预设 */
+export function presetOf(kind: string, baseUrl: string): AiPreset | undefined {
+  const host = hostOf(baseUrl);
+  if (host) return AI_PRESETS.find((p) => p.group !== "custom" && hostOf(p.baseUrl || p.hint) === host);
+  return AI_PRESETS.find((p) => p.group !== "custom" && p.kind === kind && !p.baseUrl);
+}
+
+/** 预设是否匹配搜索词：按空格拆成多个词，每个词都要命中名称（中英文）、id、地址或协议之一，不区分大小写 */
+export function presetMatches(p: AiPreset, query: string): boolean {
+  const terms = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const hay = [presetName(p), p.id, p.baseUrl, p.hint, p.kind, p.keywords ?? ""].join(" ").toLowerCase();
+  return terms.every((w) => hay.includes(w));
+}
+
+// ───────────────────────── 候选项 ─────────────────────────
+
+const AZURE_REGIONS: [string, string][] = [
+  ["eastasia", "East Asia (Hong Kong)"],
+  ["southeastasia", "Southeast Asia (Singapore)"],
+  ["japaneast", "Japan East"],
+  ["japanwest", "Japan West"],
+  ["koreacentral", "Korea Central"],
+  ["centralindia", "Central India"],
+  ["australiaeast", "Australia East"],
+  ["eastus", "East US"],
+  ["eastus2", "East US 2"],
+  ["westus", "West US"],
+  ["westus2", "West US 2"],
+  ["westus3", "West US 3"],
+  ["centralus", "Central US"],
+  ["northcentralus", "North Central US"],
+  ["southcentralus", "South Central US"],
+  ["westcentralus", "West Central US"],
+  ["canadacentral", "Canada Central"],
+  ["brazilsouth", "Brazil South"],
+  ["northeurope", "North Europe"],
+  ["westeurope", "West Europe"],
+  ["uksouth", "UK South"],
+  ["francecentral", "France Central"],
+  ["germanywestcentral", "Germany West Central"],
+  ["switzerlandnorth", "Switzerland North"],
+  ["norwayeast", "Norway East"],
+  ["swedencentral", "Sweden Central"],
+  ["uaenorth", "UAE North"],
+  ["qatarcentral", "Qatar Central"],
+  ["southafricanorth", "South Africa North"],
+  ["chinaeast2", "China East 2 (21Vianet)"],
+  ["chinanorth3", "China North 3 (21Vianet)"],
+];
+
+function regionOptions(): DropOption<string>[] {
+  return [
+    { value: "global", label: t("engines.region.global"), hint: "global" },
+    ...AZURE_REGIONS.map(([value, label]) => ({ value, label, hint: value })),
+  ];
+}
+
+const BASE_PRESETS: Record<string, [string, string][]> = {
+  openai: [
+    ["https://api.openai.com/v1", "OpenAI"],
+    ["https://api.deepseek.com/v1", "DeepSeek"],
+    ["https://dashscope.aliyuncs.com/compatible-mode/v1", "@dashscope"],
+    ["https://ark.cn-beijing.volces.com/api/v3", "@volcengine"],
+    ["https://open.bigmodel.cn/api/paas/v4", "@zhipu"],
+    ["https://api.moonshot.cn/v1", "@moonshot"],
+    ["https://api.siliconflow.cn/v1", "@siliconflow"],
+    ["https://openrouter.ai/api/v1", "OpenRouter"],
+    ["https://api.mistral.ai/v1", "Mistral"],
+    ["https://api.x.ai/v1", "xAI Grok"],
+    ["http://localhost:11434/v1", "@ollama"],
+    ["http://localhost:1234/v1", "@lmstudio"],
+  ],
+  anthropic: [["https://api.anthropic.com", "Anthropic Official"]],
+  gemini: [["https://generativelanguage.googleapis.com", "Google Gemini Official"]],
+  microsoft: [
+    ["https://api.cognitive.microsofttranslator.com", "@msGlobal"],
+    ["https://api-apc.cognitive.microsofttranslator.com", "@msApc"],
+    ["https://api-eur.cognitive.microsofttranslator.com", "@msEur"],
+    ["https://api-nam.cognitive.microsofttranslator.com", "@msNam"],
+    ["https://api.translator.azure.cn", "@msChina"],
+  ],
+  deepl: [
+    [DEEPL_FREE, "@deeplFree"],
+    ["https://api.deepl.com", "@deeplPro"],
+  ],
+  deeplx: [["http://127.0.0.1:1188/translate", "@deeplxLocal"]],
+};
+
+function presetOptions(kind: string): DropOption<string>[] | null {
+  const list = BASE_PRESETS[kind];
+  if (!list) return null;
+  return list.map(([value, label]) => ({
+    value,
+    label: label.startsWith("@") ? t(`engines.preset.${label.slice(1)}`) : label,
+    hint: value,
+  }));
+}
+
+export function defaultBase(kind: string, p: ProviderConfig): string {
+  if (kind === "deepl" && p.api_key.trim().endsWith(":fx")) return DEEPL_FREE;
+  return engineInfo(kind)?.default_base_url ?? "";
+}
+
+const modelCache = new Map<string, string[]>();
+
+/** 大模型的模型输入框：点右侧按钮从接口获取可用模型，也可以直接填写 */
+export function modelCombo(id: string, onCommit: (v: string) => void, key = `eng-${id}-model`): HTMLElement {
+  const cacheKey = () => {
+    const p = cfg().engines[id] ?? blankProvider();
+    return `${kindOf(cfg(), id)}\n${p.base_url}\n${p.api_key}\n${p.proxy ?? ""}\n${cfg().proxy ?? ""}`;
+  };
+  const toOptions = (ids: string[]) => ids.map((m) => ({ value: m, label: m }));
+  const cachedOptions = () => {
+    if (saving()) return undefined;
+    const ids = modelCache.get(cacheKey());
+    return ids && toOptions(ids);
+  };
+  return combo(cfg().engines[id]?.model ?? "", onCommit, {
+    key,
+    placeholder: t("engines.field.model.ph"),
+    title: t("engines.model.fetch"),
+    options: cachedOptions(),
+    cached: cachedOptions,
+    load: async () => {
+      await settled();
+      const c = cfg();
+      const kind = kindOf(c, id);
+      if (kind === "openai" && !c.engines[id]?.base_url?.trim()) {
+        throw new Error(t("engines.model.needBase"));
+      }
+      const hit = modelCache.get(cacheKey());
+      if (hit) return toOptions(hit);
+      const ids = await invoke<string[]>("llm_models", { id });
+      modelCache.set(cacheKey(), ids);
+      return toOptions(ids);
+    },
+  });
+}
+
+type ProxyMode = "" | "direct" | "system" | "custom";
+const PROXY_SUGGEST: DropOption<string>[] = [
+  { value: "http://127.0.0.1:7890", label: "http://127.0.0.1:7890", hint: "Clash / Mihomo" },
+  { value: "http://127.0.0.1:7897", label: "http://127.0.0.1:7897", hint: "Clash Verge Rev" },
+  { value: "http://127.0.0.1:10809", label: "http://127.0.0.1:10809", hint: "v2rayN" },
+  { value: "http://127.0.0.1:1080", label: "http://127.0.0.1:1080", hint: "Shadowsocks" },
+];
+const customProxy = new Set<string>();
+
+export function proxyField(value: string, scope: string | null, onCommit: (v: string) => void): HTMLElement {
+  const engine = scope !== null;
+  const tag = scope ?? "";
+  const v = value.trim();
+  let mode: ProxyMode = v === "system" ? "system" : v === "direct" ? (engine ? "direct" : "") : v ? "custom" : "";
+  if (!v && customProxy.has(tag)) mode = "custom";
+  const modes: DropOption<ProxyMode>[] = [
+    engine ? { value: "", label: t("proxy.followGlobal"), hint: t("proxy.followGlobalHint") } : { value: "", label: t("proxy.direct") },
+    ...(engine ? [{ value: "direct" as ProxyMode, label: t("proxy.direct") }] : []),
+    { value: "system", label: t("proxy.system"), hint: t("proxy.systemHint") },
+    { value: "custom", label: t("proxy.custom"), hint: t("proxy.customHint") },
+  ];
+  const pick = dropdown(
+    modes,
+    mode,
+    (m) => {
+      if (m === "custom") {
+        customProxy.add(tag);
+        refresh();
+        return;
+      }
+      customProxy.delete(tag);
+      onCommit(m);
+    },
+    { width: "100%" },
+  );
+  if (mode !== "custom") return pick;
+  const addr = combo(
+    v,
+    (a) => {
+      if (a) customProxy.delete(tag);
+      onCommit(a);
+    },
+    { key: `proxy-${tag}`, placeholder: t("proxy.customPh"), options: PROXY_SUGGEST },
+  );
+  return h("div", { class: "proxy-field" }, pick, addr);
+}
+
+/** 某个引擎的参数表单；改完一项（失焦、回车或选中候选项）就保存 */
+export function paramFields(id: string, fields: string[], llm = false, extraBefore: HTMLElement[] = []): HTMLElement {
+  const p = cfg().engines[id] ?? blankProvider();
+  const kind = kindOf(cfg(), id);
+  const grid = h("div", { class: "form-grid two" }, ...extraBefore);
+  for (const key of fields) {
+    if (!FIELDS.has(key)) continue;
+    const secret = SECRET.has(key);
+    const stored = key === "proxy" ? p.proxy ?? "" : ((p as unknown as Record<string, string>)[key] ?? "");
+    const def = key === "base_url" ? defaultBase(kind, p) : "";
+    const value = stored || def;
+    const label = t(`engines.field.${key}.label`);
+    const wide = key === "proxy" || key === "base_url" ? "wide" : "";
+    const save = (v: string) => void setParam(id, key, def && v.trim() === def ? "" : v);
+    if (key === "concurrency") {
+      const num = h("input", {
+        type: "number",
+        min: "1",
+        max: "16",
+        value: p.concurrency != null ? String(p.concurrency) : "",
+        placeholder: t("engines.field.concurrency.ph"),
+        "data-k": `eng-${id}-concurrency`,
+      });
+      num.addEventListener("change", () => save(num.value));
+      grid.append(field(label, num, wide));
+      continue;
+    }
+    if (key === "model") {
+      grid.append(field(label, modelCombo(id, save), wide));
+      continue;
+    }
+    if (key === "proxy") {
       grid.append(field(label, proxyField(value, id, save), wide));
       continue;
     }
@@ -78,6 +361,33 @@ export function testNote(id: string, style = "margin-top:12px"): HTMLElement | n
   if (r.error) return h("div", { class: "note bad", style }, r.error);
   if (r.result) return h("div", { class: "note ok", style }, `${r.result.source} → ${r.result.text}`);
   return null;
+}
+
+/**
+ * 引擎行的参数区：点 `pick` 展开 / 收起，只动这一行并播放过渡（不重绘整页）；
+ * 重绘时已展开的直接显示，不重播动画。测试结果放在参数区外面，展开与否位置一致。
+ */
+export function wireParams(row: HTMLElement, pick: HTMLElement, id: string, opened: Set<string>, build: () => HTMLElement) {
+  const n = testNote(id, "");
+  const note = n ? h("div", { class: "engine-params" }, n) : null;
+  if (opened.has(id)) row.append(collapsible(build()));
+  if (note) row.append(note);
+  pick.addEventListener("click", () => {
+    const isOpen = !opened.has(id);
+    if (isOpen) opened.add(id);
+    else opened.delete(id);
+    row.classList.toggle("open", isOpen);
+    pick.setAttribute("aria-expanded", String(isOpen));
+    const cur = row.querySelector<HTMLElement>(":scope > .collapse");
+    if (!isOpen) {
+      if (cur) collapse(cur, () => cur.remove());
+      return;
+    }
+    if (cur) return expand(cur); // 正在收起时又点开
+    const wrap = collapsible(build());
+    row.insertBefore(wrap, note);
+    expand(wrap);
+  });
 }
 
 /**

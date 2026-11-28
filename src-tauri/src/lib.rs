@@ -8,6 +8,7 @@ mod capture;
 mod dialog;
 mod commands;
 mod config;
+mod filter;
 mod immersive;
 mod input;
 mod layout;
@@ -132,10 +133,13 @@ pub fn run() {
             settings::immersive_detect,
             settings::app_name,
             settings::app_icon,
+            settings::store_apps,
             settings::store_query,
             settings::store_set,
             settings::store_delete,
             settings::store_clear,
+            settings::filter_events,
+            settings::filter_override,
             settings::open_settings_window,
             settings::store_stats,
             settings::engine_test,

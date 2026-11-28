@@ -1,9 +1,22 @@
 // 设置窗口的数据：类型、全局状态、保存配置、翻译方式换算
 import { invoke } from "@tauri-apps/api/core";
-import { cleanupStalePopovers, clone, errText, toast } from "./ui";
+import { cleanupStalePopovers, clone, errText, keepSwitchMotion, toast } from "./ui";
 import { langLabel, t } from "../i18n";
 
 // ───────────────────────── 类型 ─────────────────────────
+
+export interface FilterRuleSet {
+  keep_terms: string[];
+  keep_patterns: string[];
+  force_translate: string[];
+}
+
+export interface FilterConfig {
+  keep_terms: string[];
+  keep_patterns: string[];
+  force_translate: string[];
+  apps: Record<string, FilterRuleSet>;
+}
 
 export interface ImmersiveTarget {
   name: string;
@@ -14,6 +27,7 @@ export interface ImmersiveTarget {
   url_prefixes: string[];
   skip_selectors: string[];
   auto_relaunch: boolean;
+  filter?: FilterRuleSet;
 }
 
 export interface ProviderConfig {
@@ -24,6 +38,7 @@ export interface ProviderConfig {
   region: string;
   model: string;
   proxy: string | null;
+  concurrency?: number | null;
 }
 
 export interface Config {
@@ -43,6 +58,7 @@ export interface Config {
   persist_cache: boolean;
   builtin_glossary: boolean;
   glossary: Record<string, string>;
+  filter: FilterConfig;
   immersive: { enabled: boolean; hotkey: string; targets: ImmersiveTarget[] };
   /** 界面语言；空或缺省表示跟随系统 */
   ui_lang?: string;
@@ -108,6 +124,22 @@ export interface StoreStats {
   hits: number;
 }
 
+export interface StoreAppSummary {
+  id: string;
+  name: string;
+  count: number;
+}
+
+export interface FilterEvent {
+  text: string;
+  decision: string;
+  reason: string;
+  app_id: string;
+  app_name: string;
+  mode: "overlay" | "immersive";
+  at: number;
+}
+
 export interface EngineTest {
   engine: string;
   source: string;
@@ -167,7 +199,9 @@ export function setRerender(fn: () => void) {
 /** 重绘界面，并尽量把焦点还给重绘前聚焦的那个控件（按 data-k 对应） */
 export function refresh() {
   const key = (document.activeElement as HTMLElement | null)?.dataset?.k;
+  const resumeSwitch = keepSwitchMotion();
   rerender();
+  resumeSwitch();
   cleanupStalePopovers();
   if (key) document.querySelector<HTMLElement>(`[data-k="${key}"]`)?.focus({ preventScroll: true });
 }
@@ -253,10 +287,12 @@ export const langs = (): [string, string][] => LANG_TAGS.map((tag) => [tag, lang
 export const AI_KINDS = new Set(["openai", "anthropic", "gemini"]);
 
 export const kindOf = (c: Config, id: string) => (c.engines?.[id]?.type || "").trim() || id;
-export const isLLM = (c: Config, id: string) => AI_KINDS.has(kindOf(c, id));
+/** 新建的自定义接口还没选协议：AI 实例 id 都以 ai_ 开头，类型留空 */
+export const isUnsetAi = (c: Config, id: string) => id.startsWith("ai_") && !(c.engines?.[id]?.type || "").trim();
+export const isLLM = (c: Config, id: string) => AI_KINDS.has(kindOf(c, id)) || isUnsetAi(c, id);
 export const engineInfo = (kind: string) => S.catalog.find((e) => e.id === kind);
 export const providerLabel = (c: Config, id: string) =>
-  c.engines?.[id]?.name?.trim() || engineInfo(kindOf(c, id))?.name || id;
+  c.engines?.[id]?.name?.trim() || (isUnsetAi(c, id) ? t("engines.preset.custom") : engineInfo(kindOf(c, id))?.name || id);
 export const engineLabel = providerLabel;
 
 /** 配置中所有的 AI 供应商实例 id */
