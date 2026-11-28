@@ -92,8 +92,8 @@ export function buildLibrary(root: HTMLElement) {
       h(
         "div",
         { class: "toolbar" },
-        h("div", { class: "grow search" }, icon("search"), search),
         h("span", { id: "lib-app-slot" }),
+        h("div", { class: "grow search lib-search" }, icon("search"), search),
         filterBtn,
         h("button", { class: "btn ghost danger", onclick: clearLibrary }, icon("trash"), t("library.clearEllipsis")),
       ),
@@ -217,7 +217,7 @@ function renderAppSelect() {
         lib.offset = 0;
         queryLibrary();
       },
-      { placeholder: t("library.appSearch"), width: "220px", empty: ALL_APPS },
+      { placeholder: t("library.appSearch"), width: "100%", empty: ALL_APPS },
     ),
   );
 }

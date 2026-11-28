@@ -3024,6 +3024,10 @@ h2.section .spacer {
   width: 150px;
 }
 
+.lib-engine-col {
+  width: 148px;
+}
+
 .lib-apps {
   display: flex;
   flex-direction: column;
@@ -3097,6 +3101,10 @@ h2.section .spacer {
     width: 84px;
   }
 
+  .lib-engine-col {
+    width: 128px;
+  }
+
   .lib-apps {
     flex-direction: row;
     flex-wrap: wrap;
@@ -3111,11 +3119,17 @@ h2.section .spacer {
   }
 }
 
-/* 来源列：标签放不下时省略，悬停看全称；删除列只容一个图标按钮 */
-.lib-engine-col {
-  width: 148px;
+/* 工具栏：软件选择框在前，窄窗口时两个搜索框一起收缩 */
+#lib-app-slot {
+  flex: 0 1 220px;
+  min-width: 130px;
 }
 
+.lib-search {
+  min-width: 120px;
+}
+
+/* 来源列标签放不下时省略，悬停看全称；删除列只容一个图标按钮 */
 .tag.lib-engine {
   max-width: 100%;
   overflow: hidden;
